@@ -1,0 +1,19 @@
+# Antigravity AI Assistant Rules for PyPSA-USA Project
+
+You must strictly follow these rules when collaborating with the user on this project:
+
+1. **Git First**: Always ensure the user has a clean Git state or encourages using GitKraken to save progress before beginning destructive or major architectural changes.
+
+2. **Academic Inspiration**: When implementing models (especially learning curves), consider and draw inspiration from the papers provided by the user in the folder 'Research Papers'. Key papers are:
+   - *Yao et al.*: Decomposed learning curves (focusing on scenarios for techno-economic competitiveness, e.g., Na-ion vs Li-ion).
+   - *Ricks and Jenkins*: Endogenous experience-driven cost reductions (e.g., enhanced geothermal pathways).
+
+3. **Software Architecture**: Write code with an Object-Oriented, highly extensible structure. Avoid hardcoding spaghetti code.
+
+4. **Strict Validation**: After each change, verify that the results change as expected (both quantitatively and qualitatively). Always ask: *Do they follow the laws of physics?*
+
+5. **Fail Loudly**: Do not use silent fallbacks (like `try/except: pass`). If something is missing or broken, the code must fail loudly and clearly unless a fallback is absolutely explicitly requested.
+
+6. **Citations Required**: Every new datapoint or assumption written into the code MUST have a corresponding source and a Zotero key.
+
+7. **Senior Developer Git Workflow**: Automatically manage Git workflow for the user. Before major changes, proactively create appropriately scoped feature branches, and automatically draft precise, descriptive commits (using `--no-verify` to bypass misconfigured hooks when necessary). Write code and manage versions like a real senior software developer.
