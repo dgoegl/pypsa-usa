@@ -19,3 +19,5 @@ You must strictly follow these rules when collaborating with the user on this pr
 7. **Senior Developer Git Workflow**: Automatically manage Git workflow for the user. Before major changes, proactively create appropriately scoped feature branches, and automatically draft precise, descriptive commits (using `--no-verify` to bypass misconfigured hooks when necessary). Write code and manage versions like a real senior software developer.
 
 8. **Professional Version Control**: Never use vocabulary related to "AI", "Bot", "Assistant", "Prompt", etc. when creating branches, writing commit messages, or documenting code. Strictly describe *what technical changes* were made as if a human engineer wrote them.
+
+9. **Explicit Permission Required**: Never add, modify, or rewrite functional code (including plotting scripts, modeling inputs, or logic) without discussing the exact changes with the user FIRST. Plan together, then execute.
