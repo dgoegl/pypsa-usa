@@ -20,4 +20,4 @@ You must strictly follow these rules when collaborating with the user on this pr
 
 8. **Professional Version Control**: Never use vocabulary related to "AI", "Bot", "Assistant", "Prompt", etc. when creating branches, writing commit messages, or documenting code. Strictly describe *what technical changes* were made as if a human engineer wrote them.
 
-9. **Explicit Permission Required**: Never add, modify, or rewrite functional code (including plotting scripts, modeling inputs, or logic) without discussing the exact changes with the user FIRST. Plan together, then execute.
+9. **Explicit Permission Required**: Never add, modify, or rewrite functional code without discussing the exact changes with the user FIRST. Plan together, then execute.
