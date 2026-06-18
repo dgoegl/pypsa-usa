@@ -25,6 +25,8 @@ Additionally, some extra constraints specified in :mod:`solve_network` are added
 
 import copy
 import logging
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -65,6 +67,101 @@ logger_gurobi.propagate = False
 
 logger = logging.getLogger(__name__)
 pypsa.pf.logger.setLevel(logging.WARNING)
+
+
+def calculate_annuity(n_years, interest_rate):
+    """Calculate the annuity factor for a lifetime n_years and discount rate interest_rate."""
+    if interest_rate == 0:
+        return 1.0 / n_years
+    return interest_rate / (1.0 - (1.0 + interest_rate) ** (-n_years))
+
+
+def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine):
+    """
+    Computes new BESS costs using the STEER engine and updates the network
+    in-memory for extendable units in the current planning horizon.
+    """
+    # 1. Load the corresponding year's costs from resources/costs/costs_{year}.csv
+    cost_file = f"resources/costs/costs_{planning_horizon}.csv"
+    try:
+        costs_df = pd.read_csv(cost_file)
+        costs = costs_df.pivot(index="pypsa-name", columns="parameter", values="value")
+    except Exception as e:
+        logger.warning(f"Could not load cost data from {cost_file}: {e}. Using fallback default factors.")
+        # fallback defaults
+        costs = pd.DataFrame(columns=["wacc_real", "opex_fixed_per_kw", "lifetime"])
+    
+    # 2. Update BESS units
+    # We target storage units whose carrier contains "battery_storage"
+    # and whose build_year is equal to the current planning_horizon
+    bess_mask = (n.storage_units.carrier.str.contains("battery_storage")) & \
+                (n.storage_units.build_year == planning_horizon) & \
+                (n.storage_units.p_nom_extendable)
+    
+    if not bess_mask.any():
+        logger.info(f"No extendable BESS units found to update for horizon {planning_horizon}")
+        return
+        
+    bess_units = n.storage_units[bess_mask]
+    
+    # We will log a comparison table
+    comparison_rows = []
+    
+    for idx, row in bess_units.iterrows():
+        carrier = row.carrier
+        duration = float(row.max_hours)
+        
+        # Look up parameters from the cost file
+        try:
+            wacc = float(costs.at[carrier, "wacc_real"])
+            fom = float(costs.at[carrier, "opex_fixed_per_kw"])
+            lifetime = float(row.lifetime)  # read directly from network component
+        except KeyError:
+            # default fallback values if carrier not in costs
+            wacc = 0.055
+            fom = 26.25 # $/kW-year (approx 2.5% of $1050/kW)
+            lifetime = 20.0
+            
+        # Evaluate overnight CAPEX components using the STEER system engine
+        # We need Cell and Pack (energy components, config.scaling_factor == 4.0) scaled by duration,
+        # and PCS, BoS, EPC (power components, config.scaling_factor == 1.0) scaled by 1.0.
+        capex_components = {}
+        for comp in sys_engine.components:
+            # Compute native cost at component level
+            native_cost = comp.capex_us(planning_horizon, cumulative_capacity_gwh) / comp.config.scaling_factor
+            if comp.config.scaling_factor > 1.0:
+                # Energy component
+                capex_components[comp.config.name] = native_cost * duration
+            else:
+                # Power component
+                capex_components[comp.config.name] = native_cost
+                
+        # Sum total overnight CAPEX in $/kW
+        total_capex_per_kw = sum(capex_components.values())
+        
+        # Calculate annualized CAPEX + FOM in $/MW-year
+        annuity = calculate_annuity(lifetime, wacc)
+        annualized_capex_per_mw = annuity * total_capex_per_kw * 1e3
+        new_capital_cost_per_mw_year = annualized_capex_per_mw + fom * 1e3
+        
+        # Read the original cost for comparison logging
+        original_capital_cost = row.capital_cost
+        
+        # Overwrite in-memory in the network
+        n.storage_units.at[idx, "capital_cost"] = new_capital_cost_per_mw_year
+        
+        comparison_rows.append({
+            "Unit": idx,
+            "Carrier": carrier,
+            "Duration (h)": duration,
+            "ATB Cost ($/MW-yr)": f"{original_capital_cost:.1f}",
+            "STEER CAPEX ($/kW)": f"{total_capex_per_kw:.1f}",
+            "STEER Cost ($/MW-yr)": f"{new_capital_cost_per_mw_year:.1f}"
+        })
+        
+    if comparison_rows:
+        comp_df = pd.DataFrame(comparison_rows)
+        logger.info(f"\n=== BESS Cost Comparison (Year {planning_horizon}, Cum Capacity {cumulative_capacity_gwh:.1f} GWh) ===\n" + comp_df.to_string(index=False) + "\n")
 
 
 def prepare_network(n, solve_opts=None):
@@ -361,6 +458,30 @@ def solve_network(n, config, solving, opts="", **kwargs):
     n.config = config
     n.opts = opts
 
+    steer_dynamic = config.get("costs", {}).get("steer_dynamic", False)
+    if steer_dynamic:
+        if foresight != "myopic":
+            raise ValueError(
+                "STEER dynamic cost integration is only compatible with myopic foresight. "
+                f"Foresight option is set to '{foresight}'."
+            )
+        # Load the STEER SystemEngine
+        steer_dir = Path(__file__).resolve().parents[3] / "02_STEERMODEL"
+        if str(steer_dir) not in sys.path:
+            sys.path.insert(0, str(steer_dir))
+        try:
+            from steer.loader import load_system
+            sys_engine = load_system(steer_dir / "config_li_ion.yaml")
+            for comp in sys_engine.components:
+                comp.validate()
+            logger.info("Successfully loaded and validated STEER system engine.")
+            # Initialize cumulative capacity from the STEER config (maximum of components' x_local_base, e.g. 74.0 GWh)
+            cumulative_capacity_gwh = max(comp.config.x_local_base for comp in sys_engine.components)
+            logger.info(f"Initialized cumulative BESS capacity tracker at {cumulative_capacity_gwh:.1f} GWh")
+        except Exception as e:
+            logger.error(f"Failed to load or validate STEER system engine from {steer_dir}: {e}")
+            raise e
+
     match foresight:
         case "perfect":
             run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs)
@@ -369,7 +490,24 @@ def solve_network(n, config, solving, opts="", **kwargs):
                 sns_horizon = n.snapshots[n.snapshots.get_level_values(0) == planning_horizon]
                 kwargs["snapshots"] = sns_horizon
 
+                if steer_dynamic:
+                    update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine)
+
                 run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs)
+
+                if steer_dynamic:
+                    # Calculate new capacity added in this planning horizon
+                    # (only for battery storage units that were extendable in this period)
+                    bess_current_mask = (n.storage_units.carrier.str.contains("battery_storage")) & \
+                                        (n.storage_units.build_year == planning_horizon)
+                    delta_gwh = (n.storage_units.loc[bess_current_mask, "p_nom_opt"].fillna(0) * \
+                                 n.storage_units.loc[bess_current_mask, "max_hours"].fillna(0)).sum() / 1e3
+                    cumulative_capacity_gwh += delta_gwh
+                    logger.info(
+                        f"Horizon {planning_horizon} solved. "
+                        f"BESS added: {delta_gwh:.2f} GWh. "
+                        f"New cumulative capacity: {cumulative_capacity_gwh:.2f} GWh."
+                    )
 
                 if i == len(n.investment_periods) - 1:
                     logger.info(f"Final time horizon {planning_horizon}")
