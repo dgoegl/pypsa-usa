@@ -4,34 +4,27 @@ from decomposition_engine import Technology
 
 
 def main():
-    """Main test execution."""
-    # Load the tech architecture from YAML
-    yaml_path = "steer/config/steer_dummy_lfp.yaml"
+    """Main test execution against full LFP data."""
+    # Load the full tech architecture from YAML
+    yaml_path = "steer/config/steer_lfp_2024.yaml"
     tech = Technology.from_yaml(yaml_path)
 
     print(f"Loaded Technology: {tech.name}")
-    print("=" * 40)
+    print(f"Total Reference Cost: ${tech.total_system_cost:.2f} / kWh-system")
+    print("=" * 60)
+    print(f"{'Comp':<8} | {'Total':<8} | {'Commod':<8} | {'Exo (a)':<8} | {'Endo (b)':<8}")
+    print("-" * 60)
 
-    # Analyze the C1 Component
-    c1 = next(c for c in tech.components if c.name == "C1_Cell")
+    for comp in tech.components:
+        print(f"{comp.name:<8} | ${comp.total_cost:>6.2f} | ${comp.commodities_cost:>6.2f} | {comp.a_factor:>7.1%} | {comp.b_factor:>7.1%}")
+        if comp.name == "C3_PCS":
+            print(f"\n   [Debug {comp.name}] Breakdown of learnable sub-components:")
+            for s in comp.sub_components:
+                if s.bucket_tag != "Commodities":
+                    print(f"     - {s.name:<40} | ${s.current_price:>5.2f} | {s.bucket_tag}")
+            print("")
 
-    print("--- BASELINE SCENARIO ---")
-    print(f"C1 Total Cost: ${c1.total_cost:.2f}")
-    print(f"C1 Commodities Cost (Floor): ${c1.commodities_cost:.2f}")
-    print(f"C1 Learnable Cost: ${c1.learnable_cost:.2f}")
-    print(f"C1 a_factor (Exogenous %): {c1.a_factor:.1%}")
-    print(f"C1 b_factor (Endogenous %): {c1.b_factor:.1%}")
-
-    print("\n--- INFLATION REDUCTION ACT SCENARIO ---")
-    print("Shifting 'Cell Assembly & Overhead' ($25) from Exogenous to Endogenous bucket...")
-
-    # Programmatically flip a subcomponent's bucket to test the dynamic roll-up
-    target_sub = next(s for s in c1.sub_components if s.name == "Cell Assembly & Overhead")
-    target_sub.bucket_tag = "Endogenous"
-
-    print(f"\nC1 a_factor (Exogenous %): {c1.a_factor:.1%}")
-    print(f"C1 b_factor (Endogenous %): {c1.b_factor:.1%}")
-    print(f"C1 Commodities Cost (Floor): ${c1.commodities_cost:.2f} (Unchanged)")
+    print("-" * 60)
 
 
 if __name__ == "__main__":

@@ -82,6 +82,8 @@ def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine):
     in-memory for extendable units in the current planning horizon.
     """
     # 1. Load the corresponding year's costs from resources/costs/costs_{year}.csv
+    # TODO: Resolve path dynamically using n.config["run"] directory structure
+    # (e.g. resources/Default/costs/costs_{year}.csv when run name is set).
     cost_file = f"resources/costs/costs_{planning_horizon}.csv"
     try:
         costs_df = pd.read_csv(cost_file)
