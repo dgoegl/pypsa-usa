@@ -16,7 +16,9 @@ def main():
     print("-" * 60)
 
     for comp in tech.components:
-        print(f"{comp.name:<8} | ${comp.total_cost:>6.2f} | ${comp.commodities_cost:>6.2f} | {comp.a_factor:>7.1%} | {comp.b_factor:>7.1%}")
+        print(
+            f"{comp.name:<8} | ${comp.total_cost:>6.2f} | ${comp.commodities_cost:>6.2f} | {comp.a_factor:>7.1%} | {comp.b_factor:>7.1%}"
+        )
         if comp.name == "C3_PCS":
             print(f"\n   [Debug {comp.name}] Breakdown of learnable sub-components:")
             for s in comp.sub_components:

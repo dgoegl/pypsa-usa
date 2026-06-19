@@ -76,20 +76,31 @@ def calculate_annuity(n_years, interest_rate):
     return interest_rate / (1.0 - (1.0 + interest_rate) ** (-n_years))
 
 
-def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine):
+def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine, config):
     """
     Computes new BESS costs using the STEER engine and updates the network
     in-memory for extendable units in the current planning horizon.
     """
-    # 1. Load the corresponding year's costs from resources/costs/costs_{year}.csv
-    # TODO: Resolve path dynamically using n.config["run"] directory structure
-    # (e.g. resources/Default/costs/costs_{year}.csv when run name is set).
-    cost_file = f"resources/costs/costs_{planning_horizon}.csv"
-    try:
-        costs_df = pd.read_csv(cost_file)
+    # 1. Load the corresponding year's costs from the correct run directory
+    run_name = config.get("run", {}).get("name", "Default")
+    possible_paths = [
+        f"resources/{run_name}/costs/costs_{planning_horizon}.csv",
+        f"resources/costs/costs_{planning_horizon}.csv",
+    ]
+    
+    costs_df = None
+    for cost_file in possible_paths:
+        try:
+            costs_df = pd.read_csv(cost_file)
+            logger.info(f"Successfully loaded cost data from {cost_file}")
+            break
+        except FileNotFoundError:
+            continue
+            
+    if costs_df is not None:
         costs = costs_df.pivot(index="pypsa-name", columns="parameter", values="value")
-    except Exception as e:
-        logger.warning(f"Could not load cost data from {cost_file}: {e}. Using fallback default factors.")
+    else:
+        logger.warning(f"Could not load cost data for horizon {planning_horizon} from any of {possible_paths}. Using fallback default factors.")
         # fallback defaults
         costs = pd.DataFrame(columns=["wacc_real", "opex_fixed_per_kw", "lifetime"])
     
@@ -144,7 +155,14 @@ def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine):
         # Calculate annualized CAPEX + FOM in $/MW-year
         annuity = calculate_annuity(lifetime, wacc)
         annualized_capex_per_mw = annuity * total_capex_per_kw * 1e3
-        new_capital_cost_per_mw_year = annualized_capex_per_mw + fom * 1e3
+        
+        # Apply the Investment Tax Credit (ITC) modifier with a 10% monetization cost haircut
+        itc_modifier = config.get("costs", {}).get("itc_modifier", {})
+        itc_value = itc_modifier.get(carrier, 0.0)
+        monetization_cost = 0.1
+        itc_factor = 1.0 - ((1.0 - monetization_cost) * itc_value)
+        
+        new_capital_cost_per_mw_year = (annualized_capex_per_mw + fom * 1e3) * itc_factor
         
         # Read the original cost for comparison logging
         original_capital_cost = row.capital_cost
@@ -493,7 +511,7 @@ def solve_network(n, config, solving, opts="", **kwargs):
                 kwargs["snapshots"] = sns_horizon
 
                 if steer_dynamic:
-                    update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine)
+                    update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine, config)
 
                 run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs)
 
