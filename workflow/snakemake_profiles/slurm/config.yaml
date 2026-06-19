@@ -1,0 +1,6 @@
+cluster: "sbatch --mem={resources.mem_mb} -t {resources.walltime} -c {threads} --job-name=pypsa_{rule} --output=logs/slurm/%j_%rule.out --error=logs/slurm/%j_%rule.err"
+jobs: 32
+latency-wait: 60
+keep-going: true
+rerun-incomplete: true
+show-failed-logs: true
