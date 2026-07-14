@@ -76,10 +76,15 @@ def calculate_annuity(n_years, interest_rate):
     return interest_rate / (1.0 - (1.0 + interest_rate) ** (-n_years))
 
 
-def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine, config):
+def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config):
     """
     Computes new BESS costs using the STEER engine and updates the network
     in-memory for extendable units in the current planning horizon.
+
+    `experience` is a steer.experience.ExperienceState; each component is evaluated
+    against the deployment pool it actually learns from — its own chemistry's for cells,
+    all chemistries summed for pack/PCS/BoS/EPC, in GWh or GW as it declares. `tech`
+    names the chemistry these units are ("lfp"). See steer/experience.py.
     """
     # 1. Load the corresponding year's costs from the correct run directory
     run_name = config.get("run", {}).get("name", "Default")
@@ -144,8 +149,11 @@ def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine, 
         # and PCS, BoS, EPC (power components, config.scaling_factor == 1.0) scaled by 1.0.
         capex_components = {}
         for comp in sys_engine.components:
-            # Compute native cost at component level
-            native_cost = comp.capex_us(planning_horizon, cumulative_capacity_gwh) / comp.config.scaling_factor
+            # Compute native cost at component level, against the deployment this
+            # component actually learns from (own chemistry for cells, all chemistries
+            # for the rest; GWh or GW as declared).
+            x_local = experience.x_for(comp, tech)
+            native_cost = comp.capex_us(planning_horizon, x_local) / comp.config.scaling_factor
             if comp.config.scaling_factor > 1.0:
                 # Energy component
                 capex_components[comp.config.name] = native_cost * duration
@@ -188,7 +196,7 @@ def update_bess_costs(n, planning_horizon, cumulative_capacity_gwh, sys_engine, 
     if comparison_rows:
         comp_df = pd.DataFrame(comparison_rows)
         logger.info(
-            f"\n=== BESS Cost Comparison (Year {planning_horizon}, Cum Capacity {cumulative_capacity_gwh:.1f} GWh) ===\n"
+            f"\n=== BESS Cost Comparison (Year {planning_horizon}, Experience {experience}) ===\n"
             + comp_df.to_string(index=False)
             + "\n",
         )
@@ -500,15 +508,19 @@ def solve_network(n, config, solving, opts="", **kwargs):
         if str(steer_dir) not in sys.path:
             sys.path.insert(0, str(steer_dir))
         try:
+            from steer.experience import ExperienceState
             from steer.loader import load_system
 
+            # Single-technology run: LFP only. Adding Na-ion means loading a second
+            # engine and seeding both here — see 00_ADMIN/AB_Provenance_Audit_and_Strategy.md.
+            steer_tech = "lfp"
             sys_engine = load_system(steer_dir / "config_li_ion.yaml")
             for comp in sys_engine.components:
                 comp.validate()
             logger.info("Successfully loaded and validated STEER system engine.")
-            # Initialize cumulative capacity from the STEER config (maximum of components' x_local_base, e.g. 74.0 GWh)
-            cumulative_capacity_gwh = max(comp.config.x_local_base for comp in sys_engine.components)
-            logger.info(f"Initialized cumulative BESS capacity tracker at {cumulative_capacity_gwh:.1f} GWh")
+            # Seed the deployment counters each component learns from.
+            experience = ExperienceState.seed({steer_tech: sys_engine})
+            logger.info(f"Initialized STEER experience pools: {experience}")
         except Exception as e:
             logger.error(f"Failed to load or validate STEER system engine from {steer_dir}: {e}")
             raise e
@@ -525,8 +537,9 @@ def solve_network(n, config, solving, opts="", **kwargs):
                     update_bess_costs(
                         n,
                         planning_horizon,
-                        cumulative_capacity_gwh,
+                        experience,
                         sys_engine,
+                        steer_tech,
                         config,
                     )  # ← STEER sets CAPEX BEFORE solve
 
@@ -538,17 +551,16 @@ def solve_network(n, config, solving, opts="", **kwargs):
                     bess_current_mask = (n.storage_units.carrier.str.contains("battery_storage")) & (
                         n.storage_units.build_year == planning_horizon
                     )
-                    delta_gwh = (
-                        n.storage_units.loc[bess_current_mask, "p_nom_opt"].fillna(0)
-                        * n.storage_units.loc[bess_current_mask, "max_hours"].fillna(0)
-                    ).sum() / 1e3
-                    cumulative_capacity_gwh += (
-                        delta_gwh  # That line is literally a state-transition equation X(t+1) = X(t) + ΔX(t)!!!
-                    )
+                    p_nom_opt = n.storage_units.loc[bess_current_mask, "p_nom_opt"].fillna(0)
+                    max_hours = n.storage_units.loc[bess_current_mask, "max_hours"].fillna(0)
+                    added_gwh = (p_nom_opt * max_hours).sum() / 1e3
+                    added_gw = p_nom_opt.sum() / 1e3
+                    # State-transition X(t+1) = X(t) + ΔX(t), once per experience pool.
+                    experience.add(steer_tech, added_gwh=added_gwh, added_gw=added_gw)
                     logger.info(
                         f"Horizon {planning_horizon} solved. "
-                        f"BESS added: {delta_gwh:.2f} GWh. "
-                        f"New cumulative capacity: {cumulative_capacity_gwh:.2f} GWh.",
+                        f"BESS added: {added_gwh:.2f} GWh / {added_gw:.2f} GW. "
+                        f"New cumulative experience: {experience}.",
                     )
 
                 if i == len(n.investment_periods) - 1:
