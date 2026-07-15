@@ -448,35 +448,48 @@ def prepare_brownfield(n, planning_horizon):
         for c_idx in c_lim.index:
             n.remove(nm, c_idx)
 
+        # Rebuild each asset from its own saved row.
+        #
+        # This used to enumerate Generator attributes by hand and pass them one by
+        # one, which silently dropped every attribute not on that list. `sign` was
+        # missing, and pypsa's default for it is 1 (pypsa/component_attrs/
+        # generators.csv: "sign,float,n/a,1,power sign,Input (optional)"). So from
+        # the SECOND horizon onwards the load-shedding generators reverted from
+        # sign=1e-3 to sign=1.0, and their marginal_cost -- deliberately written in
+        # $/kWh, which only means "$/MWh x 1000" while sign=1e-3 -- was read as
+        # plain $/MWh. A blackout cost $100/MWh instead of $100,000/MWh and became
+        # a system-wide price cap.
+        #
+        # Measured in job 34070598 (2026-07-15), which is what exposed this:
+        #   2030 (before this function runs) shed 0 MWh          <- price correct
+        #   2040 (after)  shed 323,170 MWh, peaking at 11,086 MW <- price 1000x low
+        #   every 2040 bus price pinned at exactly $100.01/MWh   <- the cap
+        #   2030 prices reached $20,932/MWh                      <- legal at $100,010
+        # Links and StorageUnits always used the whole-row form below and were
+        # never affected.
+        #
+        # KNOWN, NOT FIXED HERE (keep one variable moving at a time): heat_rate,
+        # fuel_cost, vom_cost, carrier_base and land_region are not declared pypsa
+        # Generator attributes, so pypsa ignores them on add and they are lost here
+        # regardless of which form is used. Same class of bug, separate change.
         for df_idx in df.index:
-            if nm == "Generator":
-                n.madd(
-                    nm,
-                    [df_idx],
-                    carrier=df.loc[df_idx].carrier,
-                    bus=df.loc[df_idx].bus,
-                    p_nom_min=df.loc[df_idx].p_nom_min,
-                    p_nom=df.loc[df_idx].p_nom,
-                    p_nom_max=df.loc[df_idx].p_nom_max,
-                    p_nom_extendable=df.loc[df_idx].p_nom_extendable,
-                    ramp_limit_up=df.loc[df_idx].ramp_limit_up,
-                    ramp_limit_down=df.loc[df_idx].ramp_limit_down,
-                    efficiency=df.loc[df_idx].efficiency,
-                    marginal_cost=df.loc[df_idx].marginal_cost,
-                    capital_cost=df.loc[df_idx].capital_cost,
-                    build_year=df.loc[df_idx].build_year,
-                    lifetime=df.loc[df_idx].lifetime,
-                    heat_rate=df.loc[df_idx].heat_rate,
-                    fuel_cost=df.loc[df_idx].fuel_cost,
-                    vom_cost=df.loc[df_idx].vom_cost,
-                    carrier_base=df.loc[df_idx].carrier_base,
-                    p_min_pu=df.loc[df_idx].p_min_pu,
-                    p_max_pu=df.loc[df_idx].p_max_pu,
-                    land_region=df.loc[df_idx].land_region,
-                )
-            else:
-                n.add(nm, df_idx, **df.loc[df_idx])
+            n.add(nm, df_idx, **df.loc[df_idx])
         logger.info(n.consistency_check())
+
+        # Do not trust the rebuild -- verify it. An attribute silently reverting to
+        # its default is precisely what this function has been doing, and nothing
+        # objected for as long as it went unmeasured.
+        if nm == "Generator":
+            shed = n.generators[n.generators.carrier == "load"]
+            if not shed.empty and not np.isclose(shed.sign, 1e-3).all():
+                raise ValueError(
+                    "prepare_brownfield lost `sign` on the load-shedding generators: got "
+                    f"{sorted(set(shed.sign))}, expected 1e-3. Their marginal_cost is "
+                    "denominated in $/kWh and only means $/MWh x 1000 while sign=1e-3. At "
+                    "sign=1.0 a blackout costs 1000x less than intended and silently caps "
+                    "every price in the system, so the optimiser blacks out load instead of "
+                    "building capacity.",
+                )
 
         # copy time-dependent
         selection = n.component_attrs[nm].type.str.contains("series")
