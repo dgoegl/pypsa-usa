@@ -221,12 +221,39 @@ def prepare_network(n, solve_opts=None):
         # intersect between macroeconomic and surveybased willingness to pay
         # http://journal.frontiersin.org/article/10.3389/fenrg.2015.00055/full
         # TODO: retrieve color and nice name from config
-        logger.warning("Adding load shedding generators.")
+        #
+        # `load_shedding: true` is REJECTED rather than silently defaulted. Upstream
+        # intends `if not np.isscalar(load_shedding): load_shedding = 1e2`, but
+        # np.isscalar(True) is True, so with a bare `true` the override never runs and
+        # marginal_cost becomes the bool itself -> 1.0 $/kWh = $1,000/MWh, 100x below
+        # the intended $100,000/MWh. At $1,000/MWh, blacking out customers is cheaper
+        # than building a battery (a 4hr battery at ~$89,600/MW-yr needs to displace
+        # only ~90 MWh of shed per MW-yr to pay for itself), so the price silently
+        # decides whether the model invests for reliability at all. A full-year
+        # Sherlock run (job 33948825, 2026-07-14) was spent before this was noticed.
+        # There is no planning reserve margin in this scenario, so this number is the
+        # ONLY thing making the model care about reliability. It must be stated.
+        # NB `np.isscalar` is the wrong test here twice over: it is True for bools AND
+        # True for strings. Require an actual number.
+        if isinstance(load_shedding, bool) or not isinstance(load_shedding, (int, float)):
+            raise ValueError(
+                "solving.options.load_shedding must be an explicit value of lost load "
+                f"in $/kWh (e.g. 100 -> $100,000/MWh), got {load_shedding!r}. "
+                "A bare `true` is not accepted: np.isscalar(True) is True, so it would "
+                "silently become 1.0 $/kWh = $1,000/MWh -- cheap enough that the "
+                "optimiser sheds load instead of building capacity. Set a number, or "
+                "set `false` to disable load shedding entirely.",
+            )
+        # TODO: do not scale via sign attribute (use Eur/MWh instead of Eur/kWh)
+        logger.warning(
+            "Adding load shedding generators at %s $/kWh (= %s $/MWh). ALWAYS check the "
+            "shed VOLUME afterwards: a large shed means the model 'solved' by blacking "
+            "out load and the result is not meaningful.",
+            load_shedding,
+            load_shedding * 1e3,
+        )
         n.add("Carrier", "load", color="#dd2e23", nice_name="Load shedding")
         buses_i = n.buses.query("carrier == 'AC'").index
-        if not np.isscalar(load_shedding):
-            # TODO: do not scale via sign attribute (use Eur/MWh instead of Eur/kWh)
-            load_shedding = 1e2  # Eur/kWh
 
         n.madd(
             "Generator",
