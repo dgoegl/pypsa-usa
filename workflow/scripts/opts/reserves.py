@@ -236,7 +236,59 @@ def _get_regional_demand(n, region_buses):
     return rhs
 
 
-def define_erm_nodal_balance_constraints(n, snapshots, erm, region_name, region_buses):
+def _get_capacity_credit_series(gens, capacity_credit_map):
+    """
+    Return a pd.Series indexed by generator name with capacity credit
+    multipliers for the ERM constraint.
+
+    A carrier not present in the map defaults to 1.0 (i.e. upstream behavior:
+    the ERM constraint credits the generator at its hourly ``p_max_pu`` with no
+    derating).
+
+    Motivation: real US grid capacity markets do NOT credit variable-output
+    resources (wind, solar) at their instantaneous capacity factor. They use an
+    Effective Load Carrying Capability (ELCC) that reflects how often the
+    resource is actually producing during scarcity hours. Multiplying
+    ``p_max_pu`` by an ELCC-like scalar in the ERM constraint approximates this
+    without introducing a separate capacity market. Reference ELCC values
+    (CAISO 2024 PRM decisions): onwind ~0.11, solar ~0.29.
+
+    Parameters
+    ----------
+    gens : pd.DataFrame
+        Slice of ``n.generators`` (must have a ``carrier`` column).
+    capacity_credit_map : dict or None
+        Mapping ``{carrier: cc_value in [0, 1]}``. ``None`` or empty means
+        return all 1.0 (upstream behavior, zero effect).
+
+    Raises
+    ------
+    ValueError
+        If any ``cc_value`` is outside ``[0, 1]``.
+    """
+    cc = pd.Series(1.0, index=gens.index)
+    if not capacity_credit_map:
+        return cc
+    for carrier, value in capacity_credit_map.items():
+        f = float(value)
+        if not (0.0 <= f <= 1.0):
+            raise ValueError(
+                f"electricity.capacity_credit[{carrier!r}] = {value}: must be in [0, 1]. "
+                "Values outside this range would credit generators at negative or "
+                "above-nameplate levels in the ERM constraint, which is unphysical.",
+            )
+        cc[gens.carrier == carrier] = f
+    return cc
+
+
+def define_erm_nodal_balance_constraints(
+    n,
+    snapshots,
+    erm,
+    region_name,
+    region_buses,
+    capacity_credit_map=None,
+):
     """
     Define ERM nodal balance constraints for a given region across all investment periods.
 
@@ -255,6 +307,12 @@ def define_erm_nodal_balance_constraints(n, snapshots, erm, region_name, region_
         Name of the region for constraint naming
     region_buses : pd.DataFrame
         DataFrame containing buses in the region
+    capacity_credit_map : dict or None, optional
+        Per-carrier capacity credit multipliers ``{carrier: cc in [0, 1]}``,
+        applied to both extendable and non-extendable generator contributions
+        to the ERM LHS. Default ``None`` reproduces upstream behavior exactly
+        (no derating; carriers credited at hourly ``p_max_pu``). Storage,
+        lines, and links are unaffected.
     """
     sns = snapshots
     m = n.model
@@ -306,6 +364,22 @@ def define_erm_nodal_balance_constraints(n, snapshots, erm, region_name, region_
         ext_p_max_pu = get_as_dense(n, "Generator", "p_max_pu", sns, inds=region_ext_gens.index)
 
         ext_p_max_pu.columns.name = "Generator-ext"
+
+        # Apply per-carrier capacity credit derating (upstream behavior when None/{}).
+        if capacity_credit_map:
+            cc_ext = _get_capacity_credit_series(region_ext_gens, capacity_credit_map)
+            if (cc_ext != 1.0).any():
+                derated = {
+                    c: float(cc_ext[region_ext_gens.carrier == c].iloc[0])
+                    for c in region_ext_gens.carrier[cc_ext != 1.0].unique()
+                }
+                logger.info(
+                    "ERM %s: applying capacity credit to extendable generators: %s",
+                    region_name,
+                    derated,
+                )
+            ext_p_max_pu = ext_p_max_pu.mul(cc_ext, axis="columns")
+
         ext_contribution = ext_p_nom * ext_p_max_pu
 
         # Use .where() to remove terms for inactive periods (sets var labels to -1)
@@ -330,6 +404,23 @@ def define_erm_nodal_balance_constraints(n, snapshots, erm, region_name, region_
         nonext_activity = get_activity_mask(n, "Generator", sns)[region_nonext_gens.index]
         nonext_p_max_pu = get_as_dense(n, "Generator", "p_max_pu", sns, inds=region_nonext_gens.index)
         nonext_p_max_pu = nonext_p_max_pu * nonext_activity
+
+        # Apply per-carrier capacity credit derating to existing fleet as well
+        # (upstream behavior when None/{}).
+        if capacity_credit_map:
+            cc_nonext = _get_capacity_credit_series(region_nonext_gens, capacity_credit_map)
+            if (cc_nonext != 1.0).any():
+                derated = {
+                    c: float(cc_nonext[region_nonext_gens.carrier == c].iloc[0])
+                    for c in region_nonext_gens.carrier[cc_nonext != 1.0].unique()
+                }
+                logger.info(
+                    "ERM %s: applying capacity credit to non-extendable generators: %s",
+                    region_name,
+                    derated,
+                )
+            nonext_p_max_pu = nonext_p_max_pu.mul(cc_nonext, axis="columns")
+
         rhs_existing = region_nonext_gens.p_nom * nonext_p_max_pu
         rhs_existing.index = sns
         bus_rhs_capacity = rhs_existing.T.groupby(region_nonext_gens.bus).sum().T
@@ -358,7 +449,14 @@ def define_erm_nodal_balance_constraints(n, snapshots, erm, region_name, region_
     )
 
 
-def add_ERM_constraints(n, snapshots, config=None, snakemake=None, regional_erm_data=None):
+def add_ERM_constraints(
+    n,
+    snapshots,
+    config=None,
+    snakemake=None,
+    regional_erm_data=None,
+    capacity_credit_map=None,
+):
     """
     Add Energy Reserve Margin (ERM) constraints for regional capacity adequacy.
 
@@ -375,13 +473,18 @@ def add_ERM_constraints(n, snapshots, config=None, snakemake=None, regional_erm_
     n : pypsa.Network
         The PyPSA network object
     config : dict, optional
-        Configuration dictionary containing electricity.erm dict.
-        Required if regional_erm_data not provided.
+        Configuration dictionary containing electricity.erm dict and (optionally)
+        electricity.capacity_credit dict. Required if regional_erm_data not provided.
     snakemake : snakemake object, optional
         Not used in the new implementation, kept for API compatibility.
     regional_erm_data : dict, optional
         Direct input of ERM requirements as dict {region_name: erm_value}.
         If provided, this takes precedence over config data.
+    capacity_credit_map : dict, optional
+        Per-carrier capacity credit multipliers {carrier: cc in [0, 1]} applied
+        to generator contributions in the ERM LHS. If provided, takes precedence
+        over ``config["electricity"]["capacity_credit"]``. Default None means
+        no derating (upstream behavior).
     """
     model = n.model
 
@@ -396,6 +499,11 @@ def add_ERM_constraints(n, snapshots, config=None, snakemake=None, regional_erm_
     else:
         logger.info("No ERM configuration provided. Using default: {'all': 0.15}")
         erm_dict = default_erm
+
+    # Get capacity credit map: {carrier: cc_value in [0, 1]}
+    # Precedence: explicit argument > config value > None (no derating).
+    if capacity_credit_map is None and config is not None:
+        capacity_credit_map = config.get("electricity", {}).get("capacity_credit") or None
 
     for region_name, erm_value in erm_dict.items():
         region_list = [region_name.strip()]
@@ -443,7 +551,14 @@ def add_ERM_constraints(n, snapshots, config=None, snakemake=None, regional_erm_
             define_operational_constraints_for_extendables(n, snapshots, "Link", "p")
             define_operational_constraints_for_non_extendables(n, snapshots, "Link", "p")
 
-        define_erm_nodal_balance_constraints(n, snapshots, erm_value, region_name, region_buses)
+        define_erm_nodal_balance_constraints(
+            n,
+            snapshots,
+            erm_value,
+            region_name,
+            region_buses,
+            capacity_credit_map=capacity_credit_map,
+        )
         logger.info(f"Added ERM constraint for {region_name}")
 
 

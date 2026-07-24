@@ -18,7 +18,11 @@ from pypsa.descriptors import (
 )
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from opts.reserves import add_ERM_constraints, store_ERM_duals
+from opts.reserves import (
+    _get_capacity_credit_series,
+    add_ERM_constraints,
+    store_ERM_duals,
+)
 
 
 @pytest.fixture
@@ -340,3 +344,53 @@ def test_multi_period_erm_activity_masking(multi_period_reserve_network):
 
     # Verify the constraint was added successfully
     assert "GlobalConstraint-all_ERM" in n.model.constraints
+
+
+# ---------------------------------------------------------------------------
+# Capacity-credit (ELCC) helper — unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_gens_df():
+    return pd.DataFrame(
+        {"carrier": ["onwind", "onwind", "solar", "CCGT", "nuclear"]},
+        index=["wind_A", "wind_B", "solar_A", "gas_A", "nuc_A"],
+    )
+
+
+def test_capacity_credit_empty_map_returns_all_ones():
+    gens = _make_gens_df()
+    cc = _get_capacity_credit_series(gens, {})
+    assert (cc == 1.0).all()
+    assert list(cc.index) == list(gens.index)
+
+
+def test_capacity_credit_none_map_returns_all_ones():
+    gens = _make_gens_df()
+    cc = _get_capacity_credit_series(gens, None)
+    assert (cc == 1.0).all()
+
+
+def test_capacity_credit_applies_per_carrier():
+    gens = _make_gens_df()
+    cc = _get_capacity_credit_series(gens, {"onwind": 0.15, "solar": 0.30})
+    assert cc["wind_A"] == pytest.approx(0.15)
+    assert cc["wind_B"] == pytest.approx(0.15)
+    assert cc["solar_A"] == pytest.approx(0.30)
+    assert cc["gas_A"] == 1.0  # unlisted carrier → upstream behavior
+    assert cc["nuc_A"] == 1.0
+
+
+def test_capacity_credit_rejects_out_of_range_values():
+    gens = _make_gens_df()
+    with pytest.raises(ValueError, match=r"capacity_credit"):
+        _get_capacity_credit_series(gens, {"onwind": 1.5})
+    with pytest.raises(ValueError, match=r"capacity_credit"):
+        _get_capacity_credit_series(gens, {"solar": -0.1})
+
+
+def test_capacity_credit_unknown_carrier_is_silently_ignored():
+    """A carrier in the map but not in the network yields no error and no effect."""
+    gens = _make_gens_df()
+    cc = _get_capacity_credit_series(gens, {"battery_5day": 0.9})
+    assert (cc == 1.0).all()
