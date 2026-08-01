@@ -231,9 +231,16 @@ def load_powerplants(
         "current_planned_generator_operating_date",
     ].dt.year
 
-    # If operational_status is existing or proposed, replace generator_retirement_date with 1/1/2100
-    retirement_date = pd.to_datetime("2100-01-01")
-    plants.loc[plants.operational_status.isin(["existing", "proposed"]), "generator_retirement_date"] = retirement_date
+    # Preserve real EIA-860 `generator_retirement_date` when present; default only
+    # unannounced retirements (NaT) to 2100 (indefinite operation).
+    # Prior code unconditionally overrode all existing/proposed plants to 2100,
+    # discarding the ~26 GW of announced WECC gas/coal retirements the pipeline
+    # already loads from EIA-860 -- affecting every PyPSA-USA multi-year myopic
+    # run, not just ours. Fix isolates whether respecting real retirements is
+    # enough to make the model build new storage (STEER experiment R7, 2026-07-31).
+    default_retirement = pd.to_datetime("2100-01-01")
+    mask_default = plants.operational_status.isin(["existing", "proposed"]) & plants.generator_retirement_date.isna()
+    plants.loc[mask_default, "generator_retirement_date"] = default_retirement
 
     # Handle NaT values
     plants.loc[plants.generator_retirement_date.isna(), "generator_retirement_date"] = pd.to_datetime("1900-01-01")
