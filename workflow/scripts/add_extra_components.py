@@ -56,9 +56,28 @@ def add_nice_carrier_names(n, config):
     n.carriers["color"] = colors
 
 
+def _validate_storage_revenue_dict(name, d):
+    """Raise if any value in a storage-revenue dict is outside [0, 500] $/kW-yr."""
+    for k, v in (d or {}).items():
+        if not isinstance(v, (int, float)) or v < 0 or v > 500:
+            raise ValueError(
+                f"electricity.{name}[{k!r}] = {v}: must be a number in [0, 500] $/kW-yr. "
+                f"Values outside this range are almost certainly a units error "
+                f"(e.g. $/MW-yr not divided by 1000).",
+            )
+
+
 def attach_storageunits(n, costs, elec_opts, investment_year):
     carriers = elec_opts["extendable_carriers"]["StorageUnit"]
     carriers = [k for k in carriers if "battery_storage" in k]
+
+    # Tier A storage revenue: exogenous $/kW-yr subtracted from capital_cost
+    # as an annualized revenue offset. Missing carrier or empty dict = 0
+    # (strict no-op). See config.default.yaml for the mechanism + sources.
+    capacity_rev = elec_opts.get("storage_capacity_revenue", {}) or {}
+    ancillary_rev = elec_opts.get("storage_ancillary_revenue", {}) or {}
+    _validate_storage_revenue_dict("storage_capacity_revenue", capacity_rev)
+    _validate_storage_revenue_dict("storage_ancillary_revenue", ancillary_rev)
 
     buses_i = n.buses.index
 
@@ -68,6 +87,29 @@ def attach_storageunits(n, costs, elec_opts, investment_year):
         max_hours = int(carrier.split("hr_")[0])
         roundtrip_correction = 0.5 if "battery" in carrier else 1
 
+        # Base $/MW-yr from costs table; convert $/kW-yr revenue and subtract.
+        base_capex = costs.at[carrier, "annualized_capex_fom"]
+        cap_rev_per_mw = 1000 * capacity_rev.get(carrier, 0)
+        anc_rev_per_mw = 1000 * ancillary_rev.get(carrier, 0)
+        net_capex = base_capex - cap_rev_per_mw - anc_rev_per_mw
+        if net_capex <= 0:
+            raise ValueError(
+                f"electricity.storage_capacity_revenue + storage_ancillary_revenue for "
+                f"{carrier} ({capacity_rev.get(carrier, 0)} + {ancillary_rev.get(carrier, 0)} "
+                f"= {(cap_rev_per_mw + anc_rev_per_mw) / 1000:.1f} $/kW-yr) exceeds base "
+                f"capex ({base_capex / 1000:.1f} $/kW-yr). Would produce negative-cost "
+                f"builds -- almost certainly a config error.",
+            )
+        if cap_rev_per_mw + anc_rev_per_mw > 0:
+            logger.info(
+                f"Storage revenue applied to {carrier} (build_year={investment_year}): "
+                f"base_capex=${base_capex / 1000:.1f}/kW-yr, "
+                f"capacity_revenue=${capacity_rev.get(carrier, 0):.1f}/kW-yr, "
+                f"ancillary_revenue=${ancillary_rev.get(carrier, 0):.1f}/kW-yr, "
+                f"net_capex=${net_capex / 1000:.1f}/kW-yr "
+                f"(revenue covers {(base_capex - net_capex) / base_capex * 100:.1f}% of base)",
+            )
+
         n.madd(
             "StorageUnit",
             buses_i,
@@ -75,7 +117,7 @@ def attach_storageunits(n, costs, elec_opts, investment_year):
             bus=buses_i,
             carrier=carrier,
             p_nom_extendable=True,
-            capital_cost=costs.at[carrier, "annualized_capex_fom"],
+            capital_cost=net_capex,
             marginal_cost=0,  # costs.at[carrier, "marginal_cost"], # TODO: FIX THIS ISSUE IN BUILD_COST_DATA
             efficiency_store=costs.at[carrier, "efficiency"] ** roundtrip_correction,
             efficiency_dispatch=costs.at[carrier, "efficiency"] ** roundtrip_correction,

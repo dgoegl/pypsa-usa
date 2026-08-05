@@ -60,6 +60,12 @@ LIFETIME_DATA = [
     {"pypsa-name": "6hr_battery_storage", "parameter": "lifetime", "value": 20},
     {"pypsa-name": "8hr_battery_storage", "parameter": "lifetime", "value": 20},
     {"pypsa-name": "10hr_battery_storage", "parameter": "lifetime", "value": 20},
+    # Na-ion variants — lifetime matches LFP as a DECISION, not a copy. CATL Naxtra
+    # (2025 launch) is spec'd for >10,000 cycles, at parity with LFP; a 20-yr financial
+    # amortisation is the same physical envelope. See 00_ADMIN/AB_Provenance_Audit_and_Strategy.md
+    # §3.9.2 and config_na_ion.yaml for the reasoning.
+    {"pypsa-name": "4hr_battery_storage_naion", "parameter": "lifetime", "value": 20},
+    {"pypsa-name": "8hr_battery_storage_naion", "parameter": "lifetime", "value": 20},
 ]  # https://github.com/NREL/ReEDS-2.0/blob/e65ed5ed4ffff973071839481309f77d12d802cd/inputs/plant_characteristics/maxage.csv#L4
 
 
@@ -471,6 +477,22 @@ if __name__ == "__main__":
             pivot_atb["pypsa-name"] == f"{x}hr_battery_storage",
             "efficiency",
         ] = 0.85  # 2023 ATB
+
+    # NREL ATB does not publish Na-ion, so derive Na rows from the LFP ATB rows once
+    # WACC and efficiency have been imputed. STEER overwrites capital_cost per horizon
+    # for extendable units, so the ATB CAPEX carried here is only the initial value
+    # before the STEER pass; the rest (lifetime, wacc, efficiency, FOM) rides on the
+    # LFP row because CATL Naxtra is spec'd at parity with LFP. This is a DECISION,
+    # not a copy — audit §3.9.2. Add a new duration by extending the list below and
+    # opts/steer_carriers.BESS_CHEMISTRY_BY_CARRIER together.
+    for x in [4, 8]:
+        src = f"{x}hr_battery_storage"
+        dst = f"{x}hr_battery_storage_naion"
+        na_row = pivot_atb[pivot_atb["pypsa-name"] == src].copy()
+        if na_row.empty:
+            continue
+        na_row["pypsa-name"] = dst
+        pivot_atb = pd.concat([pivot_atb, na_row], ignore_index=True)
 
     pivot_atb["annualized_capex_per_mw"] = (
         calculate_annuity(

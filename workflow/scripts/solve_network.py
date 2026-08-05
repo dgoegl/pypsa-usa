@@ -50,6 +50,12 @@ from opts.reserves import (
     add_operational_reserve_margin,
     store_ERM_duals,
 )
+from opts.steer_carriers import (
+    STEER_CONFIG_BY_TECH,
+    assert_itc_covers_bess,
+    carriers_for_tech,
+    enabled_chemistries,
+)
 from opts.sector import (
     add_cooling_heat_pump_constraints,
     add_demand_response_constraint,
@@ -111,11 +117,13 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         # fallback defaults
         costs = pd.DataFrame(columns=["wacc_real", "opex_fixed_per_kw", "lifetime"])
 
-    # 2. Update BESS units
-    # We target storage units whose carrier contains "battery_storage"
-    # and whose build_year is equal to the current planning_horizon
+    # 2. Update BESS units — filter by *this chemistry's* carriers only. A
+    # substring match on "battery_storage" would sweep in Na-ion units (their
+    # carrier is 4hr_battery_storage_naion) and silently apply LFP's cost
+    # trajectory to them. See opts/steer_carriers.py and audit §3.9 item 5.
+    my_carriers = carriers_for_tech(tech)
     bess_mask = (
-        (n.storage_units.carrier.str.contains("battery_storage"))
+        n.storage_units.carrier.isin(my_carriers)
         & (n.storage_units.build_year == planning_horizon)
         & (n.storage_units.p_nom_extendable)
     )
@@ -168,7 +176,12 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         annuity = calculate_annuity(lifetime, wacc)
         annualized_capex_per_mw = annuity * total_capex_per_kw * 1e3
 
-        # Apply the Investment Tax Credit (ITC) modifier with a 10% monetization cost haircut
+        # Apply the Investment Tax Credit (ITC) modifier with a 10% monetization cost haircut.
+        # A missing entry for a BESS carrier here was previously the second silent trap in
+        # the Li-vs-Na comparison (audit §3.9 item 3) — .get(carrier, 0.0) would silently
+        # give a new Na carrier 0% ITC while LFP got 30%. assert_itc_covers_bess (called
+        # at STEER init below) fails loudly at startup instead; this .get default now only
+        # ever fires for non-BESS carriers that don't qualify for the credit.
         itc_modifier = config.get("costs", {}).get("itc_modifier", {})
         itc_value = itc_modifier.get(carrier, 0.0)
         monetization_cost = 0.1
@@ -543,7 +556,21 @@ def solve_network(n, config, solving, opts="", **kwargs):
                 "STEER dynamic cost integration is only compatible with myopic foresight. "
                 f"Foresight option is set to '{foresight}'.",
             )
-        # Load the STEER SystemEngine
+        # Load one STEER SystemEngine per enabled chemistry. Chemistries are picked up
+        # from the extendable_carriers.StorageUnit list via opts/steer_carriers.py, so
+        # Na-ion is opt-in: adding 4hr_battery_storage_naion to that list triggers the
+        # Na engine load; leaving it out is a pure LFP run, unchanged from before.
+        extendable_storage = config["electricity"]["extendable_carriers"]["StorageUnit"]
+        # Fail loudly at startup if any BESS carrier lacks an explicit ITC entry —
+        # audit §3.9 item 3, otherwise a new Na carrier silently gets 0% ITC while LFP
+        # gets 30% and the "symmetric" competition isn't.
+        assert_itc_covers_bess(config.get("costs", {}).get("itc_modifier", {}), extendable_storage)
+        steer_techs = enabled_chemistries(extendable_storage)
+        if not steer_techs:
+            raise ValueError(
+                "steer_dynamic: true but no BESS carriers are extendable — nothing to "
+                "compute costs for. Add e.g. 4hr_battery_storage to extendable_carriers.",
+            )
         steer_dir = Path(__file__).resolve().parents[3] / "02_STEERMODEL"
         if str(steer_dir) not in sys.path:
             sys.path.insert(0, str(steer_dir))
@@ -551,18 +578,21 @@ def solve_network(n, config, solving, opts="", **kwargs):
             from steer.experience import ExperienceState
             from steer.loader import load_system
 
-            # Single-technology run: LFP only. Adding Na-ion means loading a second
-            # engine and seeding both here — see 00_ADMIN/AB_Provenance_Audit_and_Strategy.md.
-            steer_tech = "lfp"
-            sys_engine = load_system(steer_dir / "config_li_ion.yaml")
-            for comp in sys_engine.components:
-                comp.validate()
-            logger.info("Successfully loaded and validated STEER system engine.")
-            # Seed the deployment counters each component learns from.
-            experience = ExperienceState.seed({steer_tech: sys_engine})
+            steer_engines = {}
+            for tech in steer_techs:
+                cfg_path = steer_dir / STEER_CONFIG_BY_TECH[tech]
+                engine = load_system(cfg_path)
+                for comp in engine.components:
+                    comp.validate()
+                steer_engines[tech] = engine
+                logger.info(f"Loaded and validated STEER engine for {tech} from {cfg_path.name}.")
+            # Seed one pool per (chemistry × declared unit). Na cells learn from Na
+            # only; pack/PCS/BoS/EPC learn from all deployment summed. See
+            # steer/experience.py for why the pooling can't be a shared scalar.
+            experience = ExperienceState.seed(steer_engines)
             logger.info(f"Initialized STEER experience pools: {experience}")
         except Exception as e:
-            logger.error(f"Failed to load or validate STEER system engine from {steer_dir}: {e}")
+            logger.error(f"Failed to load or validate STEER system engines from {steer_dir}: {e}")
             raise e
 
     match foresight:
@@ -574,32 +604,41 @@ def solve_network(n, config, solving, opts="", **kwargs):
                 kwargs["snapshots"] = sns_horizon
 
                 if steer_dynamic:
-                    update_bess_costs(
-                        n,
-                        planning_horizon,
-                        experience,
-                        sys_engine,
-                        steer_tech,
-                        config,
-                    )  # ← STEER sets CAPEX BEFORE solve
+                    # STEER sets CAPEX for every enabled chemistry BEFORE solve. Each
+                    # call is scoped to its own carriers by opts/steer_carriers.carriers_for_tech.
+                    for tech, engine in steer_engines.items():
+                        update_bess_costs(
+                            n,
+                            planning_horizon,
+                            experience,
+                            engine,
+                            tech,
+                            config,
+                        )
 
                 run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs)  # ← solve this horizon
 
                 if steer_dynamic:
-                    # Calculate new capacity added in this planning horizon
-                    # (only for battery storage units that were extendable in this period)
-                    bess_current_mask = (n.storage_units.carrier.str.contains("battery_storage")) & (
-                        n.storage_units.build_year == planning_horizon
-                    )
-                    p_nom_opt = n.storage_units.loc[bess_current_mask, "p_nom_opt"].fillna(0)
-                    max_hours = n.storage_units.loc[bess_current_mask, "max_hours"].fillna(0)
-                    added_gwh = (p_nom_opt * max_hours).sum() / 1e3
-                    added_gw = p_nom_opt.sum() / 1e3
-                    # State-transition X(t+1) = X(t) + ΔX(t), once per experience pool.
-                    experience.add(steer_tech, added_gwh=added_gwh, added_gw=added_gw)
+                    # State-transition X(t+1) = X(t) + ΔX(t), split by chemistry.
+                    # Every chemistry updates its OWN pool AND the shared "all" pools
+                    # inside ExperienceState.add. Using a substring match on
+                    # "battery_storage" here (as before Na was wired in) would double-
+                    # count Na deployment into LFP's own pool. Audit §3.9 item 6.
+                    horizon_summary = []
+                    for tech in steer_engines:
+                        tech_carriers = carriers_for_tech(tech)
+                        tech_mask = n.storage_units.carrier.isin(tech_carriers) & (
+                            n.storage_units.build_year == planning_horizon
+                        )
+                        p_nom_opt = n.storage_units.loc[tech_mask, "p_nom_opt"].fillna(0)
+                        max_hours = n.storage_units.loc[tech_mask, "max_hours"].fillna(0)
+                        added_gwh = (p_nom_opt * max_hours).sum() / 1e3
+                        added_gw = p_nom_opt.sum() / 1e3
+                        experience.add(tech, added_gwh=added_gwh, added_gw=added_gw)
+                        horizon_summary.append(f"{tech}: {added_gwh:.2f} GWh / {added_gw:.2f} GW")
                     logger.info(
                         f"Horizon {planning_horizon} solved. "
-                        f"BESS added: {added_gwh:.2f} GWh / {added_gw:.2f} GW. "
+                        f"BESS added — {' | '.join(horizon_summary)}. "
                         f"New cumulative experience: {experience}.",
                     )
 
