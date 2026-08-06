@@ -1,6 +1,10 @@
-"""Tests for the BESS chemistry map and the two silent-wrong-answer traps it closes.
+# ruff: noqa: D101, D102
+#   ^ pytest-convention: test classes and methods carry their intent in their name;
+#     the class docstring already documents the trap being pinned. Applying at file
+#     scope keeps the test file compact and matches common pytest style.
+"""Tests for the BESS chemistry map and the silent-wrong-answer traps it closes.
 
-Both traps sit on the Li-vs-Na comparison path
+Traps 3 and 5 sit on the Li-vs-Na comparison path
 (00_ADMIN/AB_Provenance_Audit_and_Strategy.md §3.9 items 3 and 5):
 
 * Trap 5 — ``solve_network.update_bess_costs`` matched storage units by substring
@@ -13,10 +17,19 @@ Both traps sit on the Li-vs-Na comparison path
   A new Na carrier with no entry silently got 0% ITC while LFP got 30%. This suite
   pins that :func:`assert_itc_covers_bess` fails loudly at startup for any
   extendable BESS carrier that has no explicit entry.
+
+Trap 6 (added after R10 job 37662962 failed): Na-ion cost rows are synthesised in
+``build_cost_data.py`` by copying the LFP row. Seeding a Na entry into
+``LIFETIME_DATA`` too produces two rows per Na carrier (one lifetime-only from the
+seed, one fully-filled from the copy). ``.melt()`` then explodes them into
+duplicate ``(pypsa-name, parameter)`` pairs in ``costs_*.csv``, which crashes
+``add_electricity.py:1055`` at pivot time.
 """
 
+import ast
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -121,7 +134,8 @@ class TestAssertItcCoversBess:
         itc = {"4hr_battery_storage": 0.3}
         with pytest.raises(ValueError, match=r"4hr_battery_storage_naion.*itc_modifier"):
             assert_itc_covers_bess(
-                itc, ["4hr_battery_storage", "4hr_battery_storage_naion"],
+                itc,
+                ["4hr_battery_storage", "4hr_battery_storage_naion"],
             )
 
     def test_explicit_zero_is_accepted(self):
@@ -133,3 +147,44 @@ class TestAssertItcCoversBess:
         """Only BESS carriers get the check; gas plants legitimately have no ITC."""
         itc = {"4hr_battery_storage": 0.3}
         assert_itc_covers_bess(itc, ["4hr_battery_storage", "OCGT", "solar"])
+
+
+class TestNaIonNotInLifetimeData:
+    """Trap 6: Na-ion cost rows must be synthesised, not seeded.
+
+    R10 (job 37662962) failed at ``add_electricity.py:1055`` with
+    ``ValueError: Index contains duplicate entries, cannot reshape``. Root cause:
+    ``build_cost_data.LIFETIME_DATA`` seeded ``4hr_battery_storage_naion`` and
+    ``8hr_battery_storage_naion`` with ``lifetime=20`` while the pivot_atb loop
+    further down also synthesised full Na rows by copying LFP rows. After the
+    downstream ``.melt()`` each Na parameter appeared twice in the CSV.
+
+    Na-ion lifetime = 20 is a DECISION (audit §3.9.2, CATL Naxtra >10,000 cycles
+    at parity with LFP) — the copy inherits it from the LFP row automatically. So
+    the seed is redundant AND a bug source. This test forbids it.
+    """
+
+    def test_lifetime_data_has_no_naion_entries(self):
+        source_path = Path(__file__).resolve().parent.parent / "build_cost_data.py"
+        source = source_path.read_text()
+        tree = ast.parse(source)
+        lifetime_data = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "LIFETIME_DATA"
+            ):
+                lifetime_data = ast.literal_eval(node.value)
+                break
+        assert lifetime_data is not None, "could not find LIFETIME_DATA in build_cost_data.py — has it been renamed?"
+        na_entries = [row for row in lifetime_data if row["pypsa-name"].endswith("_naion")]
+        assert not na_entries, (
+            f"LIFETIME_DATA contains Na-ion entries: {na_entries}. "
+            "Na-ion cost rows are synthesised by copying the LFP row in the "
+            "pivot_atb loop further down in build_cost_data.py. Seeding them here "
+            "creates duplicate (pypsa-name, parameter) rows in costs_*.csv, which "
+            "crashes add_electricity.py:1055 at pivot time. R10 job 37662962 "
+            "failed this way."
+        )

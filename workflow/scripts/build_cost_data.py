@@ -60,12 +60,13 @@ LIFETIME_DATA = [
     {"pypsa-name": "6hr_battery_storage", "parameter": "lifetime", "value": 20},
     {"pypsa-name": "8hr_battery_storage", "parameter": "lifetime", "value": 20},
     {"pypsa-name": "10hr_battery_storage", "parameter": "lifetime", "value": 20},
-    # Na-ion variants — lifetime matches LFP as a DECISION, not a copy. CATL Naxtra
-    # (2025 launch) is spec'd for >10,000 cycles, at parity with LFP; a 20-yr financial
-    # amortisation is the same physical envelope. See 00_ADMIN/AB_Provenance_Audit_and_Strategy.md
-    # §3.9.2 and config_na_ion.yaml for the reasoning.
-    {"pypsa-name": "4hr_battery_storage_naion", "parameter": "lifetime", "value": 20},
-    {"pypsa-name": "8hr_battery_storage_naion", "parameter": "lifetime", "value": 20},
+    # Na-ion `lifetime` intentionally NOT listed here — the Na rows are synthesised
+    # further down (`for x in [4, 8]` below) by copying the LFP wide-format row, which
+    # already carries lifetime=20 from the LFP entries above. Adding Na entries here as
+    # well produced two rows per Na carrier (one lifetime-only from this table, one
+    # fully-filled from the copy), which crashes `add_electricity.py:1055` at pivot
+    # time. Lifetime = LFP is still a DECISION, not a copy — CATL Naxtra >10,000 cycles
+    # at parity with LFP; audit §3.9.2.
 ]  # https://github.com/NREL/ReEDS-2.0/blob/e65ed5ed4ffff973071839481309f77d12d802cd/inputs/plant_characteristics/maxage.csv#L4
 
 
