@@ -9,18 +9,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_region_buses(n, region_list):
-    return n.buses[
-        (
-            n.buses.country.isin(region_list)
-            | n.buses.reeds_zone.isin(region_list)
-            | n.buses.reeds_state.isin(region_list)
-            | n.buses.interconnect.str.lower().isin(region_list)
-            | n.buses.nerc_reg.isin(region_list)
-            | n.buses.index.isin(region_list)
-            | (n.buses.region.isin(region_list) if "region" in n.buses.columns else False)
-            | (1 if "all" in region_list else 0)
-        )
-    ]
+    # Guard every column access: aggregation to state (or other topologies)
+    # drops columns like reeds_zone that only exist at base-network level.
+    # Bitwise | evaluates eagerly, so an AttributeError anywhere short-circuits
+    # the whole expression before the alternative columns are consulted.
+    cols = n.buses.columns
+    mask = pd.Series(False, index=n.buses.index)
+    for col in ("country", "reeds_zone", "reeds_state", "nerc_reg", "region"):
+        if col in cols:
+            mask = mask | n.buses[col].isin(region_list)
+    if "interconnect" in cols:
+        mask = mask | n.buses.interconnect.str.lower().isin(region_list)
+    mask = mask | n.buses.index.isin(region_list)
+    if "all" in region_list:
+        return n.buses
+    return n.buses[mask]
 
 
 def filter_components(
