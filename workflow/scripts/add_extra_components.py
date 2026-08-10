@@ -1706,7 +1706,7 @@ if __name__ == "__main__":
                 f"'exports.costs' must be 'wholesale', name of a carrier, or a float/int. Received: {export_costs}",
             )
 
-        add_elec_imports_exports(n, "exports", export_flowgates, fuel_costs, co2_emissions)
+        add_elec_imports_exports(n, "exports", export_flowgates, fuel_costs, co2_emissions, zone_col)
 
     if snakemake.config["scenario"]["sector"] == "E":
         # add node level CO2 (underground) storage
