@@ -504,7 +504,6 @@ def add_ERM_constraints(
     # Precedence: explicit argument > config value > None (no derating).
     if capacity_credit_map is None and config is not None:
         capacity_credit_map = config.get("electricity", {}).get("capacity_credit") or None
-    logger.info(f"DEBUG-R11h capacity_credit_map resolved to: {capacity_credit_map}")
 
     for region_name, erm_value in erm_dict.items():
         region_list = [region_name.strip()]
