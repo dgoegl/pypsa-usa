@@ -339,9 +339,17 @@ def add_RPS_constraints(n, config, snakemake=None):
         lhs = p_eligible.sum() - renewable_gen
         rhs = 0
 
+        # Include carrier list in the name so multiple RPS rows for the same
+        # (rec_trading_zone, planning_horizon) with different carrier sets do
+        # not collide. _collapse_portfolio_standards concatenates the user's
+        # portfolio_standards.csv + rps_reeds + ces_reeds; the same region/year
+        # can legitimately appear multiple times with different eligible-carrier
+        # lists (e.g. user's SB100 list vs REEDS RPS_CARRIERS). CES sibling loop
+        # (line ~455) already uses this pattern.
+        carrier_name = "-".join(carriers)
         n.model.add_constraints(
             lhs >= rhs,
-            name=f"GlobalConstraint-{rec_trading_zone}_{planning_horizon}_rps_limit",
+            name=f"GlobalConstraint-{rec_trading_zone}_{planning_horizon}_{carrier_name}_rps_limit",
         )
 
         logger.info(
