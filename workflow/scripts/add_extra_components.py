@@ -419,6 +419,35 @@ def attach_multihorizon_existing_generators(
     if gens.empty or len(n.investment_periods) == 1:
         return
 
+    # 2026-08-13 fix: for FIRST horizon (existing plants preserved at nameplate under
+    # retirement:technical), respect real EIA-860 generator_retirement_date. Compute
+    # lifetime = min(default_from_costs, real_retirement_year - investment_year) so
+    # plants retire on their real schedule via PyPSA active_assets. For subsequent
+    # horizons (new-build candidates with p_nom_min=0), keep default lifetime because
+    # they represent hypothetical NEW capacity, not the same aging unit.
+    default_lifetimes = gens.carrier.map(costs.cost_recovery_period_years)
+    if investment_year == n.investment_periods[0] and "generator_retirement_date" in gens.columns:
+        real_retire_years = pd.to_datetime(
+            gens.generator_retirement_date,
+            errors="coerce",
+        ).dt.year
+        real_lifetime = real_retire_years - investment_year
+        valid_real = real_retire_years.notna() & (real_lifetime > 0)
+        effective_lifetime = default_lifetimes.copy()
+        effective_lifetime[valid_real] = np.minimum(
+            default_lifetimes[valid_real],
+            real_lifetime[valid_real],
+        )
+        n_retiring_by_horizon = ((real_retire_years > investment_year) & (real_retire_years <= 2050)).sum()
+        if n_retiring_by_horizon > 0:
+            logger.info(
+                f"attach_multihorizon_existing_generators: {n_retiring_by_horizon} plants "
+                f"have real retirement dates between {investment_year} and 2050; their "
+                f"lifetimes now match EIA-860 dates (not the default {default_lifetimes.mode().iloc[0]}-year lifetime).",
+            )
+    else:
+        effective_lifetime = default_lifetimes
+
     n.madd(
         "Generator",
         gens.index,
@@ -437,7 +466,7 @@ def attach_multihorizon_existing_generators(
         p_max_pu=gens.p_max_pu,
         capital_cost=gens.carrier.map(costs.annualized_capex_fom),
         build_year=investment_year,
-        lifetime=gens.carrier.map(costs.cost_recovery_period_years),
+        lifetime=effective_lifetime,
         land_region=gens.land_region,
     )
 
