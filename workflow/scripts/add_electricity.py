@@ -394,6 +394,28 @@ def filter_plants_by_region(
 
     plants_filt = plants_filt.drop(columns=["geometry"])
     plants_filt = plants_filt[~plants_filt.index.duplicated()]
+
+    # 2026-08-12 fix: rescue plants dropped by every spatial join above so they are
+    # not silently lost. Without this, ~139 CA CCGT + ~350 CA OCGT existing units
+    # fall out here when their EIA lat/lon lies just outside all ReEDS shapes,
+    # which caused CCGT capacity to drop 22.8 GW -> 5.0 GW in R11i. We add them
+    # back with country=NaN so match_plant_to_bus first-pass skips them and the
+    # unconditional second pass snaps them to the nearest network bus.
+    missing_idx = plants.index.difference(plants_filt.index)
+    if len(missing_idx) > 0:
+        rescued = plants.loc[missing_idx].copy()
+        rescued["country"] = np.nan
+        # drop the geometry column added at line 328 if present (parity with plants_filt)
+        if "geometry" in rescued.columns:
+            rescued = rescued.drop(columns=["geometry"])
+        logger.warning(
+            f"filter_plants_by_region: rescuing {len(rescued)} plants dropped by spatial joins "
+            f"({np.round(rescued.p_nom.sum() / 1000, 2)} GW). "
+            "They will be snapped to the nearest bus in match_plant_to_bus.",
+        )
+        plants_filt = pd.concat([plants_filt, rescued])
+        plants_filt = plants_filt[~plants_filt.index.duplicated()]
+
     return pd.DataFrame(plants_filt)
 
 
@@ -406,7 +428,16 @@ def attach_renewable_capacities_to_atlite(
         "bus_assignment in @n.buses.index",
     )
     for tech in renewable_carriers:
-        plants_filt = plants.query("carrier == @tech").copy()
+        # 2026-08-12 fix: only fold "existing" plant capacity into the extendable
+        # ATLite/GodEEEP generator's p_nom / p_nom_min. load_powerplants() also
+        # keeps "proposed" plants whose planned build_year <= first horizon (see
+        # lines 228-232 + 249), so without this filter the fixed-existing p_nom
+        # for CA onwind ballooned from raw 6.5 GW to 35.5 GW in R11i (5.4x).
+        # p_nom_max is set upstream from ATLite site potential and is unaffected.
+        if "operational_status" in plants.columns:
+            plants_filt = plants.query("carrier == @tech and operational_status == 'existing'").copy()
+        else:
+            plants_filt = plants.query("carrier == @tech").copy()
         if plants_filt.empty:
             continue
 
@@ -470,6 +501,23 @@ def attach_conventional_generators(
         .join(costs, on="carrier", rsuffix="_r")
         .rename(index=lambda s: "C" + str(s))
     )
+
+    # 2026-08-12 fix: last-resort snap to nearest bus for any conventional plant
+    # that still has no bus_assignment. Without this, plants with NaN bus_assignment
+    # are silently dropped in downstream simplify_network/cluster_network aggregation
+    # (get_clustering_from_busmap drops rows whose bus isn't in the busmap). This
+    # is one of the mechanisms behind the CA CCGT 22.8 -> 5.0 GW drop in R11i.
+    missing_bus = plants[plants.bus_assignment.isna() | ~plants.bus_assignment.isin(n.buses.index)]
+    if not missing_bus.empty and n.buses.shape[0] > 0:
+        tree = BallTree(n.buses[["x", "y"]].values, leaf_size=2)
+        _, idx = tree.query(missing_bus[["longitude", "latitude"]].values, k=1)
+        snapped = n.buses.reset_index().iloc[idx.flatten()]["Bus"].values
+        logger.warning(
+            f"attach_conventional_generators: snapping {len(missing_bus)} plants "
+            f"({np.round(missing_bus.p_nom.sum() / 1000, 2)} GW) with missing bus_assignment "
+            "to the nearest network bus.",
+        )
+        plants.loc[missing_bus.index, "bus_assignment"] = snapped
 
     plants["efficiency"] = plants.efficiency.astype(float).fillna(plants.efficiency_r)
 
@@ -798,7 +846,15 @@ def attach_battery_storage(
     plants: pd.DataFrame,
 ):
     """Attaches Existing Battery Energy Storage Systems To the Network."""
-    plants_filt = plants.query("carrier == 'battery' ")
+    # 2026-08-12 fix: exclude "proposed" batteries. The docstring calls this the
+    # "Existing" BESS attachment and p_nom_extendable=False below, so folding in
+    # proposed units gives the model unpaid-for capacity it cannot expand or
+    # retire. In R11i this added ~4.1 GW of CA "proposed" batteries into the
+    # fixed-existing count (raw 12.1 GW existing -> ~16.2 GW plus residual).
+    if "operational_status" in plants.columns:
+        plants_filt = plants.query("carrier == 'battery' and operational_status == 'existing'")
+    else:
+        plants_filt = plants.query("carrier == 'battery' ")
     plants_filt.index = plants_filt.index.astype(str) + "_" + plants_filt.generator_id.astype(str)
     plants_filt.loc[:, "energy_storage_capacity_mwh"] = plants_filt.energy_storage_capacity_mwh.astype(float)
     plants_filt = plants_filt.dropna(subset=["energy_storage_capacity_mwh"])
