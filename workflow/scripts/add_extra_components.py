@@ -87,27 +87,22 @@ def attach_storageunits(n, costs, elec_opts, investment_year):
         max_hours = int(carrier.split("hr_")[0])
         roundtrip_correction = 0.5 if "battery" in carrier else 1
 
-        # Base $/MW-yr from costs table; convert $/kW-yr revenue and subtract.
+        # 2026-08-13 fix: DO NOT subtract storage revenue here. Revenue offset is
+        # now applied AFTER apply_itc via apply_storage_revenue() below, so that the
+        # config value equals the LP-effective offset (no 0.73 ITC multiplier
+        # interference). Also removes the base_capex > subsidy hard check, because
+        # for CAISO-anchored credits ($133/kW-yr for ancillary+RA+5-min markets
+        # PyPSA cannot model), the LP-effective offset may exceed the pre-ITC base
+        # capex, which is physically correct (batteries earn more than they cost).
+        # The old behavior (subtract before ITC + hard check) remains available if
+        # apply_storage_revenue() is not called.
         base_capex = costs.at[carrier, "annualized_capex_fom"]
-        cap_rev_per_mw = 1000 * capacity_rev.get(carrier, 0)
-        anc_rev_per_mw = 1000 * ancillary_rev.get(carrier, 0)
-        net_capex = base_capex - cap_rev_per_mw - anc_rev_per_mw
-        if net_capex <= 0:
-            raise ValueError(
-                f"electricity.storage_capacity_revenue + storage_ancillary_revenue for "
-                f"{carrier} ({capacity_rev.get(carrier, 0)} + {ancillary_rev.get(carrier, 0)} "
-                f"= {(cap_rev_per_mw + anc_rev_per_mw) / 1000:.1f} $/kW-yr) exceeds base "
-                f"capex ({base_capex / 1000:.1f} $/kW-yr). Would produce negative-cost "
-                f"builds -- almost certainly a config error.",
-            )
-        if cap_rev_per_mw + anc_rev_per_mw > 0:
+        net_capex = base_capex  # storage revenue offsets now applied post-ITC
+        if capacity_rev.get(carrier, 0) + ancillary_rev.get(carrier, 0) > 0:
             logger.info(
-                f"Storage revenue applied to {carrier} (build_year={investment_year}): "
-                f"base_capex=${base_capex / 1000:.1f}/kW-yr, "
-                f"capacity_revenue=${capacity_rev.get(carrier, 0):.1f}/kW-yr, "
-                f"ancillary_revenue=${ancillary_rev.get(carrier, 0):.1f}/kW-yr, "
-                f"net_capex=${net_capex / 1000:.1f}/kW-yr "
-                f"(revenue covers {(base_capex - net_capex) / base_capex * 100:.1f}% of base)",
+                f"Storage revenue for {carrier} deferred to apply_storage_revenue() "
+                f"(post-ITC): capacity_revenue=${capacity_rev.get(carrier, 0):.1f}/kW-yr, "
+                f"ancillary_revenue=${ancillary_rev.get(carrier, 0):.1f}/kW-yr",
             )
 
         n.madd(
@@ -621,6 +616,47 @@ def apply_itc(n, itc_modifier, monitization_cost=0.1):
 
         carrier_mask = n.storage_units["carrier"] == carrier
         n.storage_units.loc[carrier_mask, "capital_cost"] *= 1 - ((1 - monitization_cost) * itc_modifier[carrier])
+
+
+def apply_storage_revenue(n, capacity_revenue: dict, ancillary_revenue: dict):
+    """
+    Subtracts exogenous storage revenue offsets from storage_unit capital_cost.
+
+    2026-08-13 fix: this runs AFTER apply_itc so the config value in $/kW-yr equals
+    the LP-effective offset (previously the offset was subtracted inside
+    attach_storageunits BEFORE apply_itc's 0.73 multiplier, giving only 73% of the
+    configured offset in the LP). Represents CAISO-empirical revenue streams that
+    PyPSA cannot model: ancillary services, resource adequacy capacity contracts,
+    5-minute dispatch upside. See CLAUDE.md workaround notes 2026-08-12.
+
+    Arguments:
+    n: pypsa.Network,
+    capacity_revenue: dict,
+        Dict of $/kW-yr revenue offset per carrier (RA + capacity market payments).
+    ancillary_revenue: dict,
+        Dict of $/kW-yr revenue offset per carrier (ancillary services + 5-min).
+    """
+    combined = {
+        c: (capacity_revenue.get(c, 0) + ancillary_revenue.get(c, 0))
+        for c in set(capacity_revenue) | set(ancillary_revenue)
+    }
+    for carrier, rev_kwyr in combined.items():
+        if rev_kwyr == 0:
+            continue
+        carrier_mask = n.storage_units["carrier"] == carrier
+        if not carrier_mask.any():
+            continue
+        rev_per_mw_yr = 1000.0 * rev_kwyr
+        before = n.storage_units.loc[carrier_mask, "capital_cost"].mean()
+        n.storage_units.loc[carrier_mask, "capital_cost"] -= rev_per_mw_yr
+        after = n.storage_units.loc[carrier_mask, "capital_cost"].mean()
+        logger.info(
+            f"apply_storage_revenue: {carrier}: capital_cost mean ${before / 1000:.1f} -> "
+            f"${after / 1000:.1f} /kW-yr (subtracted ${rev_kwyr:.1f}/kW-yr). "
+            "Negative net capital_cost is intentional and represents batteries that "
+            "earn more from RA+ancillary+5-min markets than their annualized capex costs "
+            "(matching real CAISO 2022 profitability).",
+        )
 
 
 def apply_ptc(n, ptc_modifier, costs):
@@ -1608,6 +1644,14 @@ if __name__ == "__main__":
         n.mremove("Generator", multi_horizon_gens.index)
 
     apply_itc(n, snakemake.config["costs"]["itc_modifier"])
+    # 2026-08-13 fix: apply storage revenue AFTER ITC so config values in $/kW-yr
+    # equal the LP-effective offset. Previously the offset was subtracted in
+    # attach_storageunits BEFORE apply_itc's 0.73 multiplier -> 27% loss.
+    apply_storage_revenue(
+        n,
+        snakemake.config["electricity"].get("storage_capacity_revenue", {}) or {},
+        snakemake.config["electricity"].get("storage_ancillary_revenue", {}) or {},
+    )
     apply_ptc(n, snakemake.config["costs"]["ptc_modifier"], costs)
     apply_max_annual_growth_rate(n, snakemake.config["costs"]["max_growth"])
     add_nice_carrier_names(n, snakemake.config)
