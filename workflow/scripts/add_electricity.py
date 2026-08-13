@@ -1117,6 +1117,29 @@ def main(snakemake):
         n.investment_periods,
         interconnect=interconnection,
     )
+    # 2026-08-13 fix: pre-filter plants to the target-state list BEFORE the region
+    # spatial join. Without this, the rescue patch added inside filter_plants_by_region
+    # on 2026-08-12 pulls every Western-WECC plant into the model's county buses when
+    # the model is restricted to a subset (e.g. include.reeds_state=['CA']), because
+    # the rescue snaps plants to the nearest bus regardless of their real state. R11L
+    # observed CA onwind at 31 GW (=WECC total) instead of 6.5 GW (=CA real). Now the
+    # rescue only fires for plants whose state is actually in the target list.
+    target_states = (
+        snakemake.config.get("model_topology", {})
+        .get("include", {})
+        .get(
+            "reeds_state",
+            [],
+        )
+        or []
+    )
+    if target_states and "state" in plants.columns:
+        n_before = len(plants)
+        plants = plants[plants.state.isin(target_states)]
+        logger.info(
+            f"add_electricity: restricted plants to target states {target_states}: "
+            f"{n_before} -> {len(plants)} plants (skipped for non-restricted WECC runs)",
+        )
     plants = filter_plants_by_region(
         plants,
         regions_onshore,
