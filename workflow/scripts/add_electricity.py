@@ -225,6 +225,28 @@ def load_powerplants(
         plants["generator_retirement_date"],
     )
 
+    # 2026-08-14 fix: also read planned_generator_retirement_date, an EIA-860 field
+    # for utility-announced future retirements not yet reflected in
+    # generator_retirement_date. For CA operational gas this covers 11 plants
+    # (3.34 GW) with announced dates 2026-2030. Effective retirement date is the
+    # EARLIER of the two, so plants retire on whichever comes first.
+    if "planned_generator_retirement_date" in plants.columns:
+        plants["planned_generator_retirement_date"] = pd.to_datetime(
+            plants["planned_generator_retirement_date"],
+            errors="coerce",
+        )
+        both = plants.generator_retirement_date.notna() & plants.planned_generator_retirement_date.notna()
+        earlier_planned = both & (plants.planned_generator_retirement_date < plants.generator_retirement_date)
+        plants.loc[earlier_planned, "generator_retirement_date"] = plants.loc[
+            earlier_planned,
+            "planned_generator_retirement_date",
+        ]
+        only_planned = plants.generator_retirement_date.isna() & plants.planned_generator_retirement_date.notna()
+        plants.loc[only_planned, "generator_retirement_date"] = plants.loc[
+            only_planned,
+            "planned_generator_retirement_date",
+        ]
+
     # if operational_status is proposed replace build_year with year of current_planned_generator_operating_date
     plants.loc[plants.operational_status == "proposed", "build_year"] = plants.loc[
         plants.operational_status == "proposed",
