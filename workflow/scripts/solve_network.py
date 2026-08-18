@@ -50,12 +50,6 @@ from opts.reserves import (
     add_operational_reserve_margin,
     store_ERM_duals,
 )
-from opts.steer_carriers import (
-    STEER_CONFIG_BY_TECH,
-    assert_itc_covers_bess,
-    carriers_for_tech,
-    enabled_chemistries,
-)
 from opts.sector import (
     add_cooling_heat_pump_constraints,
     add_demand_response_constraint,
@@ -66,6 +60,12 @@ from opts.sector import (
     add_sector_co2_constraints,
     add_sector_demand_response_constraints,
     add_water_heater_constraints,
+)
+from opts.steer_carriers import (
+    STEER_CONFIG_BY_TECH,
+    assert_itc_covers_bess,
+    carriers_for_tech,
+    enabled_chemistries,
 )
 
 logger_gurobi = logging.getLogger("gurobipy")
@@ -187,7 +187,29 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         monetization_cost = 0.1
         itc_factor = 1.0 - ((1.0 - monetization_cost) * itc_value)
 
-        new_capital_cost_per_mw_year = (annualized_capex_per_mw + fom * 1e3) * itc_factor
+        steer_cost_per_mw_year = (annualized_capex_per_mw + fom * 1e3) * itc_factor
+
+        # Re-apply the exogenous storage revenue offset that apply_storage_revenue applied at
+        # network-build time. STEER's overwrite here would otherwise silently discard that
+        # offset (bug found 2026-08-18: R11M-v1 and all children ran with revenue effectively
+        # zero on STEER-on paths, because this line replaced capital_cost with STEER's raw
+        # cost). Applying it again here keeps STEER-on and STEER-off paths symmetric in
+        # revenue treatment, per Findings_2026-08-18.md.
+        elec_cfg = config.get("electricity", {})
+        cap_rev = elec_cfg.get("storage_capacity_revenue", {}) or {}
+        anc_rev = elec_cfg.get("storage_ancillary_revenue", {}) or {}
+        revenue_kwyr = float(cap_rev.get(carrier, 0)) + float(anc_rev.get(carrier, 0))
+        revenue_per_mw_year = 1000.0 * revenue_kwyr
+        new_capital_cost_per_mw_year = steer_cost_per_mw_year - revenue_per_mw_year
+
+        if new_capital_cost_per_mw_year < 0:
+            logger.warning(
+                f"{idx} ({carrier} {planning_horizon}): NET capital_cost after revenue = "
+                f"${new_capital_cost_per_mw_year:,.0f}/MW-yr is NEGATIVE. LP will likely be "
+                f"UNBOUNDED. STEER=${steer_cost_per_mw_year:,.0f} minus revenue="
+                f"${revenue_per_mw_year:,.0f}. Reduce storage_capacity_revenue or "
+                f"storage_ancillary_revenue in config so credit stays strictly below STEER cost.",
+            )
 
         # Read the original cost for comparison logging
         original_capital_cost = row.capital_cost
@@ -202,7 +224,9 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
                 "Duration (h)": duration,
                 "ATB Cost ($/MW-yr)": f"{original_capital_cost:.1f}",
                 "STEER CAPEX ($/kW)": f"{total_capex_per_kw:.1f}",
-                "STEER Cost ($/MW-yr)": f"{new_capital_cost_per_mw_year:.1f}",
+                "STEER Cost ($/MW-yr)": f"{steer_cost_per_mw_year:.1f}",
+                "Revenue Offset ($/MW-yr)": f"{revenue_per_mw_year:.1f}",
+                "Net LP Cost ($/MW-yr)": f"{new_capital_cost_per_mw_year:.1f}",
             },
         )
 
