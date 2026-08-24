@@ -79,10 +79,11 @@ def config_provider(*keys, default=None):
 
 
 def solver_threads(w):
-    solver_options = config_provider("solving", "solver_options")(w)
-    option_set = config_provider("solving", "solver", "options")(w)
-    threads = solver_options[option_set].get("threads", 4)
-    return threads
+    solver_options = config_provider("solving", "solver_options")(w) or {}
+    option_set = config_provider("solving", "solver", "options")(w) or "gurobi-default"
+    if isinstance(solver_options, dict) and option_set in solver_options:
+        return solver_options[option_set].get("threads", 8)
+    return 8
 
 
 def memory(w):
