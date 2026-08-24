@@ -125,7 +125,7 @@ def distribute_clusters(
         f"Number of clusters must be {len(n_subnetwork_nodes)} <= n_clusters <= {n_subnetwork_nodes.sum()} for this selection of countries."
     )
 
-    if focus_weights is not None:
+    if focus_weights and isinstance(focus_weights, dict):
         total_focus = sum(list(focus_weights.values()))
 
         assert total_focus <= 1.0, "The sum of focus weights must be less than or equal to 1."
