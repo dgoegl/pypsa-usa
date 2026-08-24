@@ -536,7 +536,7 @@ def update_config_from_wildcards(config, w, inplace=True):
         opts = w.opts.split("-")
 
         if nhours := get_opt(opts, r"^\d+(h|seg)$"):
-            config["clustering"]["temporal"]["resolution_elec"] = nhours
+            config.setdefault("clustering", {}).setdefault("temporal", {})["resolution_elec"] = nhours
 
         co2l_enable, co2l_value = find_opt(opts, "Co2L")
         if co2l_enable:
