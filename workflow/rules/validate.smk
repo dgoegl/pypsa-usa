@@ -1,9 +1,9 @@
 rule solve_network_validation:
     params:
-        solving=config["solving"],
-        foresight=config["foresight"],
+        solving=config.get("solving", config.get("solve", {})),
+        foresight=config.get("foresight", "myopic"),
         planning_horizons=config["scenario"]["planning_horizons"],
-        co2_sequestration_potential=config["sector"].get(
+        co2_sequestration_potential=config.get("sector", {}).get(
             "co2_sequestration_potential", 200
         ),
     input:
@@ -40,8 +40,8 @@ rule solve_network_validation:
 
 rule plot_validation_figures:
     params:
-        eia_api=config["api"]["eia"],
-        snapshots=config["snapshots"],
+        eia_api=config.get("api", {}).get("eia", ""),
+        snapshots=config.get("snapshots", {}),
     input:
         network=RESULTS
         + "{interconnect}/networks/elec_s{simpl}_c{clusters}_ec_l{ll}_{opts}_{sector}_operations.nc",
