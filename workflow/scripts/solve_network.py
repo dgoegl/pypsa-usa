@@ -445,13 +445,38 @@ def run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs):
             **kwargs,
         )
 
-    if status != "ok" and not rolling_horizon:
-        logger.warning(
-            f"Solving status '{status}' with termination condition '{condition}'",
-        )
     if "infeasible" in condition:
         # n.model.print_infeasibilities()
         raise RuntimeError("Solving status 'infeasible'")
+
+    # RAISE, do not warn. A barrier that stalls returns status 'warning' with condition
+    # 'suboptimal', and the old code logged one line and carried on: the network was
+    # written, snakemake reported success, slurm reported COMPLETED, exit 0. R21
+    # (job 40651525, 2026-08-24) did exactly that -- "Numerical trouble encountered" in
+    # 2030 and "Sub-optimal termination" in 2040, with a 21% primal-dual gap, and still
+    # produced a 383 MB .nc that looks like a result. Under myopic foresight a bad early
+    # horizon also propagates, because prepare_brownfield carries its build forward.
+    #
+    # CLAUDE.md 5: make the silent path impossible.
+    allow_suboptimal = bool(cf_solving.get("allow_suboptimal", False))
+    if not rolling_horizon and not allow_suboptimal and (status != "ok" or condition != "optimal"):
+        raise RuntimeError(
+            f"Solve did not reach optimality: status '{status}', condition "
+            f"'{condition}'. The network was NOT written. This is usually numerical: "
+            "check the Gurobi log for 'Numerical trouble', 'Sub-optimal termination', "
+            "or the 'large bounds'/'large rhs' warnings, and consider NumericFocus, "
+            "enabling crossover, or reducing the coefficient range. Set "
+            "solving.options.allow_suboptimal: true to override, but then say so "
+            "explicitly in the run's README -- the numbers are not trustworthy.",
+        )
+    if allow_suboptimal and (status != "ok" or condition != "optimal"):
+        logger.error(
+            "ALLOW_SUBOPTIMAL IS SET and the solve did not reach optimality "
+            "(status %r, condition %r). Continuing anyway. Any number produced by "
+            "this run is provisional and must be labelled as such.",
+            status,
+            condition,
+        )
 
 
 def prepare_brownfield(n, planning_horizon):
@@ -610,7 +635,7 @@ def solve_network(n, config, solving, opts="", **kwargs):
                     comp.validate()
                 steer_engines[tech] = engine
                 logger.info(f"Loaded and validated STEER engine for {tech} from {cfg_path.name}.")
-            # Seed one pool per (chemistry × declared unit). Na cells learn from Na
+            # Seed one pool per (chemistry x declared unit). Na cells learn from Na
             # only; pack/PCS/BoS/EPC learn from all deployment summed. See
             # steer/experience.py for why the pooling can't be a shared scalar.
             experience = ExperienceState.seed(steer_engines)
