@@ -8,14 +8,14 @@ rule plot_network_maps:
         regions_onshore=(
             config["custom_files"]["files_path"]
             + "regions_onshore_s{simpl}_{clusters}.geojson"
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES
             + "{interconnect}/Geospatial/regions_onshore_s{simpl}_{clusters}.geojson"
         ),
         regions_offshore=(
             config["custom_files"]["files_path"]
             + "regions_offshore_s{simpl}_{clusters}.geojson"
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES
             + "{interconnect}/Geospatial/regions_offshore_s{simpl}_{clusters}.geojson"
         ),
@@ -47,14 +47,14 @@ rule plot_statistics:
         regions_onshore=(
             config["custom_files"]["files_path"]
             + "regions_onshore_s_{clusters}.geojson"
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES
             + "{interconnect}/Geospatial/regions_onshore_s{simpl}_{clusters}.geojson"
         ),
         regions_offshore=(
             config["custom_files"]["files_path"]
             + "regions_offshore_s_{clusters}.geojson"
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES
             + "{interconnect}/Geospatial/regions_offshore_s{simpl}_{clusters}.geojson"
         ),

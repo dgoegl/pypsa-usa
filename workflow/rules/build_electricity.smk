@@ -864,12 +864,12 @@ rule prepare_network:
         network=(
             config["custom_files"]["files_path"]
             + config["custom_files"]["network_name"]
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES + "{interconnect}/elec_s{simpl}_c{clusters}_ec.nc"
         ),
         tech_costs=(
             config["custom_files"]["files_path"] + "costs_2030.csv"
-            if config["custom_files"].get("activate", False)
+            if config.get("custom_files", {}).get("activate", False)
             else RESOURCES
             + f"costs/costs_{config['scenario']['planning_horizons'][0]}.csv"
         ),
