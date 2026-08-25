@@ -292,6 +292,38 @@ def prepare_network(n, solve_opts=None):
         n.add("Carrier", "load", color="#dd2e23", nice_name="Load shedding")
         buses_i = n.buses.query("carrier == 'AC'").index
 
+        # Size the backstop. Upstream hardcodes p_nom=1e9 kW = 1 TW PER BUS, roughly
+        # 17x California's entire peak on every one of 58 buses. That single number is
+        # the source of the coefficient range Gurobi complains about on every run:
+        #     Bounds range  [3e+09, 3e+09]
+        #     Warning: Model contains large rhs / large bounds
+        # and it is the leading suspect for the barrier stalls that killed R21, R23,
+        # R24, R25, R26, R27, R31 and R32 (all "Numerical trouble encountered" at
+        # 50-90 iterations with primal infeasibility frozen).
+        #
+        # load_shedding_p_nom_factor sizes each shed generator to a multiple of ITS OWN
+        # bus's peak load instead. It stays a backstop that cannot bind -- R11N shed
+        # 2.3 MWh across a whole year against a fleet of tens of GW -- while removing
+        # the 1e9 bound. Omit the option and behaviour is byte-identical to upstream,
+        # so this changes nothing for any run that does not opt in.
+        shed_factor = solve_opts.get("load_shedding_p_nom_factor")
+        if shed_factor:
+            bus_peak_mw = n.loads_t.p_set.T.groupby(n.loads.bus).sum().T.max().reindex(buses_i)
+            # a bus with no load still needs a finite backstop; give it the fleet median
+            bus_peak_mw = bus_peak_mw.fillna(bus_peak_mw.median()).clip(lower=1.0)
+            shed_p_nom = bus_peak_mw * 1e3 * float(shed_factor)  # MW -> kW, then scale
+            logger.warning(
+                "Load-shed p_nom sized to %.1fx each bus's own peak instead of the "
+                "upstream 1e9 kW: range %.3g to %.3g kW (was 1e+09 everywhere). This "
+                "compresses the LP bound range by about %.0fx.",
+                float(shed_factor),
+                shed_p_nom.min(),
+                shed_p_nom.max(),
+                1e9 / max(shed_p_nom.max(), 1.0),
+            )
+        else:
+            shed_p_nom = 1e9  # kW, upstream default
+
         n.madd(
             "Generator",
             buses_i,
@@ -300,7 +332,7 @@ def prepare_network(n, solve_opts=None):
             carrier="load",
             sign=1e-3,  # Adjust sign to measure p and p_nom in kW instead of MW
             marginal_cost=load_shedding,  # Eur/kWh
-            p_nom=1e9,  # kW
+            p_nom=shed_p_nom,  # kW
         )
 
     if solve_opts.get("noisy_costs"):  ##random noise to costs of generators
