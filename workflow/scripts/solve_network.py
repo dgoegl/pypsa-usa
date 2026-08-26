@@ -460,8 +460,31 @@ def extra_functionality(n, snapshots):
         add_fossil_generation_constraint(n, config)
 
 
+def jitter_extendable_capital_costs(n, cf_solving):
+    """Break capital-cost ties among extendable generators and storage units.
+
+    noisy_costs (prepare_network) perturbs marginal costs everywhere but capital
+    costs only for Line/Link, so extendable Generator/StorageUnit capital costs
+    stay exactly equal across nodes. When no policy floor pins the build, that
+    equality is a flat optimal face and barrier stalls sub-optimal: R40-R43
+    (2026-08-26) all died this way at 2030 the moment the TCT mandate was
+    loosened by crediting the existing fleet, while the identically-configured
+    tight-mandate parent R36 certified. Multiplicative +/-5e-5 jitter sits above
+    BarConvTol (1e-5) and orders of magnitude below any decision-relevant cost
+    difference. Called from run_optimize so it lands AFTER update_bess_costs,
+    which overwrites battery capital costs from STEER before every horizon.
+    """
+    if not cf_solving.get("noisy_costs"):
+        return
+    for t in n.iterate_components(["Generator", "StorageUnit"]):
+        ext = t.df["p_nom_extendable"].to_numpy(dtype=bool)
+        if ext.any():
+            t.df.loc[ext, "capital_cost"] *= 1 + 1e-4 * (np.random.random(int(ext.sum())) - 0.5)
+
+
 def run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs):
     """Initiate the correct type of pypsa.optimize function."""
+    jitter_extendable_capital_costs(n, cf_solving)
     if rolling_horizon:
         kwargs["horizon"] = cf_solving.get("horizon", 365)
         kwargs["overlap"] = cf_solving.get("overlap", 0)
