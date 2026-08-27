@@ -654,6 +654,18 @@ def solve_network(n, config, solving, opts="", **kwargs):
     n.opts = opts
 
     steer_dynamic = config.get("costs", {}).get("steer_dynamic", False)
+    # Frozen-experience twin (Act 2 counterfactual, 2026-08-27): STEER still prices
+    # every horizon (commodity floors, global exogenous forecast and macro factor all
+    # keep their year dependence), but the state transition X(t+1) = X(t) + dX(t) is
+    # skipped, so California's own builds never feed back into the experience pools.
+    # Endo run minus frozen run therefore isolates the endogenous learning feedback
+    # alone: identical cost model, identical 2030 starting point by construction.
+    steer_freeze_experience = config.get("costs", {}).get("steer_freeze_experience", False)
+    if steer_freeze_experience and not steer_dynamic:
+        raise ValueError(
+            "steer_freeze_experience: true requires steer_dynamic: true — the flag "
+            "freezes STEER's experience pools, which only exist on the STEER path.",
+        )
     if steer_dynamic:
         if foresight != "myopic":
             raise ValueError(
@@ -722,7 +734,13 @@ def solve_network(n, config, solving, opts="", **kwargs):
 
                 run_optimize(n, rolling_horizon, skip_iterations, cf_solving, **kwargs)  # ← solve this horizon
 
-                if steer_dynamic:
+                if steer_dynamic and steer_freeze_experience:
+                    logger.info(
+                        f"Horizon {planning_horizon} solved. steer_freeze_experience: true — "
+                        f"experience pools NOT updated (frozen exogenous twin). "
+                        f"Pools remain: {experience}.",
+                    )
+                if steer_dynamic and not steer_freeze_experience:
                     # State-transition X(t+1) = X(t) + ΔX(t), split by chemistry.
                     # Every chemistry updates its OWN pool AND the shared "all" pools
                     # inside ExperienceState.add. Using a substring match on
