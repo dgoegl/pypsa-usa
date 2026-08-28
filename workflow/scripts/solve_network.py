@@ -690,13 +690,27 @@ def solve_network(n, config, solving, opts="", **kwargs):
         steer_dir = Path(__file__).resolve().parents[3] / "02_STEERMODEL"
         if str(steer_dir) not in sys.path:
             sys.path.insert(0, str(steer_dir))
+        # Per-run override of which STEER config file a chemistry loads
+        # (costs.steer_config_by_tech, e.g. {na: config_na_ion_s005.yaml}). With the
+        # key absent every run resolves exactly as before via STEER_CONFIG_BY_TECH.
+        # This exists so runs with different spillover_sigma variants can execute in
+        # PARALLEL on the cluster: without it they would all read the one shared
+        # config_na_ion.yaml, whose content at solve-start time (hours after sbatch
+        # submission) is a race. The run config also becomes the provenance record
+        # of exactly which STEER file produced its numbers.
+        steer_cfg_override = config.get("costs", {}).get("steer_config_by_tech", {}) or {}
         try:
             from steer.experience import ExperienceState
             from steer.loader import load_system
 
             steer_engines = {}
             for tech in steer_techs:
-                cfg_path = steer_dir / STEER_CONFIG_BY_TECH[tech]
+                cfg_path = steer_dir / steer_cfg_override.get(tech, STEER_CONFIG_BY_TECH[tech])
+                if not cfg_path.exists():
+                    raise FileNotFoundError(
+                        f"STEER config for '{tech}' not found: {cfg_path} "
+                        f"(override in costs.steer_config_by_tech: {steer_cfg_override})",
+                    )
                 engine = load_system(cfg_path)
                 for comp in engine.components:
                     comp.validate()
