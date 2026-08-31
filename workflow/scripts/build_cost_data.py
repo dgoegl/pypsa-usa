@@ -486,6 +486,16 @@ if __name__ == "__main__":
     # LFP row because CATL Naxtra is spec'd at parity with LFP. This is a DECISION,
     # not a copy — audit §3.9.2. Add a new duration by extending the list below and
     # opts/steer_carriers.BESS_CHEMISTRY_BY_CARRIER together.
+    # Exception (R68+, 2026-08-30): costs.naion_roundtrip_efficiency in the run config,
+    # when present, overrides the inherited LFP roundtrip efficiency on the Na rows only
+    # (AC-AC system value; add_extra_components applies it as sqrt on store and dispatch).
+    # Key absent = exact parity, so every run before R68 is reproduced bit-for-bit.
+    naion_rte = costs.get("naion_roundtrip_efficiency")
+    if naion_rte is not None and not 0.5 <= float(naion_rte) <= 1.0:
+        raise ValueError(
+            f"costs.naion_roundtrip_efficiency = {naion_rte}: must be in [0.5, 1.0] "
+            f"(AC-AC roundtrip fraction, e.g. 0.80), almost certainly a units error.",
+        )
     for x in [4, 8]:
         src = f"{x}hr_battery_storage"
         dst = f"{x}hr_battery_storage_naion"
@@ -493,6 +503,14 @@ if __name__ == "__main__":
         if na_row.empty:
             continue
         na_row["pypsa-name"] = dst
+        if naion_rte is not None:
+            na_row["efficiency"] = float(naion_rte)
+            logger.info(
+                "Na-ion roundtrip efficiency overridden to %.3f for %s (LFP stays %.3f)",
+                float(naion_rte),
+                dst,
+                pivot_atb.loc[pivot_atb["pypsa-name"] == src, "efficiency"].values[0],
+            )
         pivot_atb = pd.concat([pivot_atb, na_row], ignore_index=True)
 
     pivot_atb["annualized_capex_per_mw"] = (
