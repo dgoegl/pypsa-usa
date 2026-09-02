@@ -496,6 +496,19 @@ if __name__ == "__main__":
             f"costs.naion_roundtrip_efficiency = {naion_rte}: must be in [0.5, 1.0] "
             f"(AC-AC roundtrip fraction, e.g. 0.80), almost certainly a units error.",
         )
+    # Exception (R83+, 2026-09-02): costs.naion_lifetime_years in the run config, when
+    # present, overrides the inherited LFP lifetime on the Na rows only. It must be
+    # written to cost_recovery_period_years, because add_extra_components.py:122 sets
+    # the component lifetime (retirement, and the value STEER's annuity reads via
+    # solve_network.py update_bess_costs row.lifetime) from cost_recovery_period_years,
+    # not from the "lifetime" parameter; both are set to stay self-consistent.
+    # Key absent = exact parity, so every run before R83 is reproduced bit-for-bit.
+    naion_lifetime = costs.get("naion_lifetime_years")
+    if naion_lifetime is not None and not 10 <= float(naion_lifetime) <= 40:
+        raise ValueError(
+            f"costs.naion_lifetime_years = {naion_lifetime}: must be in [10, 40] "
+            f"(calendar years, e.g. 25), almost certainly a units error.",
+        )
     for x in [4, 8]:
         src = f"{x}hr_battery_storage"
         dst = f"{x}hr_battery_storage_naion"
@@ -510,6 +523,18 @@ if __name__ == "__main__":
                 float(naion_rte),
                 dst,
                 pivot_atb.loc[pivot_atb["pypsa-name"] == src, "efficiency"].values[0],
+            )
+        if naion_lifetime is not None:
+            na_row["cost_recovery_period_years"] = float(naion_lifetime)
+            na_row["lifetime"] = float(naion_lifetime)
+            logger.info(
+                "Na-ion lifetime/CRP overridden to %.1f years for %s (LFP stays %.1f)",
+                float(naion_lifetime),
+                dst,
+                pivot_atb.loc[
+                    pivot_atb["pypsa-name"] == src,
+                    "cost_recovery_period_years",
+                ].values[0],
             )
         pivot_atb = pd.concat([pivot_atb, na_row], ignore_index=True)
 
