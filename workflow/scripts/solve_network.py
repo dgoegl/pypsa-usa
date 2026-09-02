@@ -34,6 +34,7 @@ import pypsa
 import yaml
 from _helpers import (
     configure_logging,
+    resolve_period_value,
     update_config_from_wildcards,
 )
 from opts.bidirectional_link import add_bidirectional_link_constraints
@@ -198,7 +199,14 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         elec_cfg = config.get("electricity", {})
         cap_rev = elec_cfg.get("storage_capacity_revenue", {}) or {}
         anc_rev = elec_cfg.get("storage_ancillary_revenue", {}) or {}
-        revenue_kwyr = float(cap_rev.get(carrier, 0)) + float(anc_rev.get(carrier, 0))
+        # Per-period credits (dict values) resolve at this vintage's planning
+        # horizon; the bess_mask above already restricts to build_year ==
+        # planning_horizon, keeping this symmetric with apply_storage_revenue's
+        # per-build_year resolution on the STEER-off path.
+        revenue_kwyr = resolve_period_value(
+            cap_rev.get(carrier, 0),
+            planning_horizon,
+        ) + resolve_period_value(anc_rev.get(carrier, 0), planning_horizon)
         revenue_per_mw_year = 1000.0 * revenue_kwyr
         new_capital_cost_per_mw_year = steer_cost_per_mw_year - revenue_per_mw_year
 

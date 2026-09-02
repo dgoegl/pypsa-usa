@@ -153,6 +153,23 @@ def calculate_annuity(n, r):
         return 1 / n
 
 
+def resolve_period_value(value, year):
+    """
+    Resolve a possibly time-dependent config value at one planning year.
+
+    Scalars pass through unchanged (a scalar credit applies to every year).
+    A dict maps planning year -> value, e.g. {2030: 5, 2035: 5}; a year
+    missing from the dict resolves to 0.0, which is how a time-limited
+    credit expires. Used by the storage revenue offsets in
+    add_extra_components.py (resolved at each vintage's build_year) and
+    solve_network.py (resolved at the planning horizon), which must stay
+    symmetric; see _validate_storage_revenue_dict for the schema guard.
+    """
+    if isinstance(value, dict):
+        return float(value.get(int(year), 0.0))
+    return float(value)
+
+
 def load_costs(tech_costs: str) -> pd.DataFrame:
     df = pd.read_csv(tech_costs)
     return df.pivot(index="pypsa-name", columns="parameter", values="value").fillna(0)

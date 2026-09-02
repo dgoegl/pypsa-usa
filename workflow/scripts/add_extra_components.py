@@ -6,7 +6,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pypsa
-from _helpers import calculate_annuity, configure_logging
+from _helpers import calculate_annuity, configure_logging, resolve_period_value
 from add_electricity import add_missing_carriers
 from eia import FuelCosts
 from opts._helpers import get_region_buses
@@ -57,14 +57,34 @@ def add_nice_carrier_names(n, config):
 
 
 def _validate_storage_revenue_dict(name, d):
-    """Raise if any value in a storage-revenue dict is outside [0, 500] $/kW-yr."""
-    for k, v in (d or {}).items():
-        if not isinstance(v, (int, float)) or v < 0 or v > 500:
+    """Raise if any value in a storage-revenue dict is outside [0, 500] $/kW-yr.
+
+    Per-carrier values may be scalars (credit applies every year) or dicts
+    mapping planning year -> value, e.g. {2030: 5, 2035: 5}; a year missing
+    from the dict resolves to 0 (time-limited credit expiry, see
+    _helpers.resolve_period_value). Year keys must be ints in [2020, 2060].
+    """
+
+    def _check_amount(label, v):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or v > 500:
             raise ValueError(
-                f"electricity.{name}[{k!r}] = {v}: must be a number in [0, 500] $/kW-yr. "
+                f"electricity.{name}[{label}] = {v}: must be a number in [0, 500] $/kW-yr. "
                 f"Values outside this range are almost certainly a units error "
                 f"(e.g. $/MW-yr not divided by 1000).",
             )
+
+    for k, v in (d or {}).items():
+        if isinstance(v, dict):
+            for yr, amount in v.items():
+                if not isinstance(yr, int) or isinstance(yr, bool) or yr < 2020 or yr > 2060:
+                    raise ValueError(
+                        f"electricity.{name}[{k!r}] year key {yr!r}: must be an integer "
+                        f"planning year in [2020, 2060]. Quoted years in YAML parse as "
+                        f"strings and would silently resolve to 0.",
+                    )
+                _check_amount(f"{k!r}][{yr}", amount)
+        else:
+            _check_amount(repr(k), v)
 
 
 def attach_storageunits(n, costs, elec_opts, investment_year):
@@ -98,11 +118,14 @@ def attach_storageunits(n, costs, elec_opts, investment_year):
         # apply_storage_revenue() is not called.
         base_capex = costs.at[carrier, "annualized_capex_fom"]
         net_capex = base_capex  # storage revenue offsets now applied post-ITC
-        if capacity_rev.get(carrier, 0) + ancillary_rev.get(carrier, 0) > 0:
+        cap_rev_yr = resolve_period_value(capacity_rev.get(carrier, 0), investment_year)
+        anc_rev_yr = resolve_period_value(ancillary_rev.get(carrier, 0), investment_year)
+        if cap_rev_yr + anc_rev_yr > 0:
             logger.info(
-                f"Storage revenue for {carrier} deferred to apply_storage_revenue() "
-                f"(post-ITC): capacity_revenue=${capacity_rev.get(carrier, 0):.1f}/kW-yr, "
-                f"ancillary_revenue=${ancillary_rev.get(carrier, 0):.1f}/kW-yr",
+                f"Storage revenue for {carrier} (build_year {investment_year}) deferred "
+                f"to apply_storage_revenue() (post-ITC): "
+                f"capacity_revenue=${cap_rev_yr:.1f}/kW-yr, "
+                f"ancillary_revenue=${anc_rev_yr:.1f}/kW-yr",
             )
 
         n.madd(
@@ -665,27 +688,33 @@ def apply_storage_revenue(n, capacity_revenue: dict, ancillary_revenue: dict):
     ancillary_revenue: dict,
         Dict of $/kW-yr revenue offset per carrier (ancillary services + 5-min).
     """
-    combined = {
-        c: (capacity_revenue.get(c, 0) + ancillary_revenue.get(c, 0))
-        for c in set(capacity_revenue) | set(ancillary_revenue)
-    }
-    for carrier, rev_kwyr in combined.items():
-        if rev_kwyr == 0:
-            continue
+    for carrier in set(capacity_revenue) | set(ancillary_revenue):
         carrier_mask = n.storage_units["carrier"] == carrier
         if not carrier_mask.any():
             continue
-        rev_per_mw_yr = 1000.0 * rev_kwyr
-        before = n.storage_units.loc[carrier_mask, "capital_cost"].mean()
-        n.storage_units.loc[carrier_mask, "capital_cost"] -= rev_per_mw_yr
-        after = n.storage_units.loc[carrier_mask, "capital_cost"].mean()
-        logger.info(
-            f"apply_storage_revenue: {carrier}: capital_cost mean ${before / 1000:.1f} -> "
-            f"${after / 1000:.1f} /kW-yr (subtracted ${rev_kwyr:.1f}/kW-yr). "
-            "Negative net capital_cost is intentional and represents batteries that "
-            "earn more from RA+ancillary+5-min markets than their annualized capex costs "
-            "(matching real CAISO 2022 profitability).",
-        )
+        # Per-period credits (dict values, see _helpers.resolve_period_value)
+        # resolve at each vintage's build_year: a 2030-vintage unit keeps its
+        # 2030 credit for life, a 2040 vintage built after expiry gets none.
+        # Scalars resolve to the same value for every vintage (old behavior).
+        for build_year, vintage in n.storage_units[carrier_mask].groupby("build_year"):
+            rev_kwyr = resolve_period_value(
+                capacity_revenue.get(carrier, 0),
+                build_year,
+            ) + resolve_period_value(ancillary_revenue.get(carrier, 0), build_year)
+            if rev_kwyr == 0:
+                continue
+            rev_per_mw_yr = 1000.0 * rev_kwyr
+            before = vintage["capital_cost"].mean()
+            n.storage_units.loc[vintage.index, "capital_cost"] -= rev_per_mw_yr
+            after = n.storage_units.loc[vintage.index, "capital_cost"].mean()
+            logger.info(
+                f"apply_storage_revenue: {carrier} build_year {build_year}: capital_cost "
+                f"mean ${before / 1000:.1f} -> ${after / 1000:.1f} /kW-yr "
+                f"(subtracted ${rev_kwyr:.1f}/kW-yr). "
+                "Negative net capital_cost is intentional and represents batteries that "
+                "earn more from RA+ancillary+5-min markets than their annualized capex costs "
+                "(matching real CAISO 2022 profitability).",
+            )
 
 
 def apply_ptc(n, ptc_modifier, costs):
