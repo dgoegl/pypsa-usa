@@ -630,7 +630,25 @@ def solve_network(n, config, solving, opts="", **kwargs):
     cf_solving = solving["options"]
 
     foresight = snakemake.params.foresight
-    kwargs["multi_investment_periods"] = config["foresight"] == "perfect"
+    # Activity mask in every solve, also myopic. Port of the core line of upstream
+    # PyPSA/pypsa-usa#749 (merged 2026-05-27), which sets this to True unconditionally.
+    #
+    # Before: `config["foresight"] == "perfect"`, so False for myopic runs. With False,
+    # PyPSA 0.30.2's get_activity_mask returns all True, so each horizon solve could build
+    # and dispatch EVERY candidate, including units whose build_year is a later horizon
+    # (paid at that later horizon's cheaper capital cost) and units past
+    # build_year + lifetime. The reserve margin (opts/reserves.py, get_activity_mask)
+    # credited them too. Found in steer-capex-model #156: in R183's 2030 solve the reserve
+    # price equalled the 2040 OCGT cost.
+    #
+    # With True, PyPSA masks dispatch, the capacity cost in the objective and the ERM terms
+    # by build_year <= period < build_year + lifetime for the period being solved. The
+    # myopic loop still passes one horizon's snapshots at a time, and prepare_brownfield
+    # below already locks only units active in the solved horizon, so it needs no change.
+    # Side effect to know when reading results: the objective, and every dual that is not
+    # a nodal price (GlobalConstraint mu, ERM duals), is multiplied by that period's
+    # investment_period_weightings.objective; nodal prices are rescaled by PyPSA itself.
+    kwargs["multi_investment_periods"] = True
 
     kwargs["solver_options"] = solving["solver_options"][set_of_options] if set_of_options else {}
     kwargs["solver_name"] = solving["solver"]["name"]
