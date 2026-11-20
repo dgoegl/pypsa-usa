@@ -83,6 +83,69 @@ def calculate_annuity(n_years, interest_rate):
     return interest_rate / (1.0 - (1.0 + interest_rate) ** (-n_years))
 
 
+#: Folder names tried, in order, next to the PyPSA-USA checkout when
+#: costs.steer_model_dir is not set.
+STEER_DIR_CANDIDATES = ("02_STEERMODEL", "openlearning")
+
+
+def resolve_steer_dir(config, script_path=__file__):
+    """
+    Return the folder of the STEER cost model (its ``steer`` package and config files).
+
+    ``costs.steer_model_dir`` wins if set; a relative value is taken relative to the
+    folder that holds the PyPSA-USA checkout. Otherwise the first existing folder of
+    STEER_DIR_CANDIDATES in that folder is used. Raises FileNotFoundError if the
+    configured folder does not exist or no candidate exists.
+    """
+    project_root = Path(script_path).resolve().parents[3]
+    configured = config.get("costs", {}).get("steer_model_dir")
+    if configured:
+        steer_dir = Path(configured)
+        if not steer_dir.is_absolute():
+            steer_dir = project_root / steer_dir
+        if not steer_dir.is_dir():
+            raise FileNotFoundError(
+                f"costs.steer_model_dir is set to '{configured}', but {steer_dir} is not an existing folder.",
+            )
+        return steer_dir
+    tried = [project_root / name for name in STEER_DIR_CANDIDATES]
+    for candidate in tried:
+        if candidate.is_dir():
+            return candidate
+    raise FileNotFoundError(
+        f"STEER cost model folder not found. Tried: {', '.join(str(p) for p in tried)}. "
+        "Set costs.steer_model_dir to its location.",
+    )
+
+
+def add_steer_to_path(steer_dir):
+    """
+    Put steer_dir at the front of sys.path so its ``steer`` package is the one imported.
+
+    The copy in the resolved folder always wins, also over an installed ``steer`` (e.g.
+    via pip). If steer_dir is already later in sys.path it is moved to the front, not
+    added twice. Raises ImportError if ``steer`` was already imported from somewhere
+    outside steer_dir, since that module would otherwise silently stay in use.
+    """
+    steer_dir = str(steer_dir)
+    loaded = sys.modules.get("steer")
+    if loaded is not None:
+        # __file__ for a regular package, __path__ for a namespace package.
+        locations = [getattr(loaded, "__file__", None), *getattr(loaded, "__path__", [])]
+        locations = list(dict.fromkeys(Path(p).resolve() for p in locations if p))
+        inside = Path(steer_dir).resolve()
+        if not locations or not all(p.is_relative_to(inside) for p in locations):
+            found = ", ".join(str(p) for p in locations) or "an unknown location"
+            raise ImportError(
+                f"steer is already imported from {found}, outside the STEER folder {steer_dir}. "
+                "Make sure nothing imports steer before solve_network sets up the path.",
+            )
+    if sys.path[:1] != [steer_dir]:
+        while steer_dir in sys.path:
+            sys.path.remove(steer_dir)
+        sys.path.insert(0, steer_dir)
+
+
 def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config):
     """
     Computes new BESS costs using the STEER engine and updates the network
@@ -695,9 +758,8 @@ def solve_network(n, config, solving, opts="", **kwargs):
                 "steer_dynamic: true but no BESS carriers are extendable — nothing to "
                 "compute costs for. Add e.g. 4hr_battery_storage to extendable_carriers.",
             )
-        steer_dir = Path(__file__).resolve().parents[3] / "02_STEERMODEL"
-        if str(steer_dir) not in sys.path:
-            sys.path.insert(0, str(steer_dir))
+        steer_dir = resolve_steer_dir(config)
+        add_steer_to_path(steer_dir)
         # Per-run override of which STEER config file a chemistry loads
         # (costs.steer_config_by_tech, e.g. {na: config_na_ion_s005.yaml}). With the
         # key absent every run resolves exactly as before via STEER_CONFIG_BY_TECH.
