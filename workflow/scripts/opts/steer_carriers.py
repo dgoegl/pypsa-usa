@@ -33,7 +33,8 @@ BESS_CHEMISTRY_BY_CARRIER: dict[str, str] = {
     "8hr_battery_storage_naion": "na",
 }
 
-#: STEER config file to load for each chemistry, relative to ``02_STEERMODEL/``.
+#: STEER config file to load for each chemistry, relative to the STEER model folder
+#: (see ``solve_network.resolve_steer_dir``).
 STEER_CONFIG_BY_TECH: dict[str, str] = {
     "lfp": "config_li_ion.yaml",
     "na": "config_na_ion.yaml",
