@@ -83,6 +83,26 @@ def calculate_annuity(n_years, interest_rate):
     return interest_rate / (1.0 - (1.0 + interest_rate) ** (-n_years))
 
 
+def _bess_cost_param(costs, carrier, parameter, planning_horizon, cost_file):
+    """Return one numeric cost parameter of a battery carrier, or raise naming what is missing."""
+    where = f"for planning horizon {planning_horizon} in {cost_file}"
+    if carrier not in costs.index:
+        raise KeyError(f"Battery carrier '{carrier}' has no entry in the cost data {where}.")
+    if parameter not in costs.columns:
+        raise KeyError(f"Cost parameter '{parameter}' is missing for battery carrier '{carrier}' {where}.")
+    raw = costs.at[carrier, parameter]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if np.isnan(value):
+        raise ValueError(
+            f"Cost parameter '{parameter}' for battery carrier '{carrier}' is missing or "
+            f"not a number ({raw!r}) {where}.",
+        )
+    return value
+
+
 def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config):
     """
     Computes new BESS costs using the STEER engine and updates the network
@@ -109,14 +129,14 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         except FileNotFoundError:
             continue
 
-    if costs_df is not None:
-        costs = costs_df.pivot(index="pypsa-name", columns="parameter", values="value")
-    else:
-        logger.warning(
-            f"Could not load cost data for horizon {planning_horizon} from any of {possible_paths}. Using fallback default factors.",
+    if costs_df is None:
+        # No silent defaults: a run priced with made-up battery factors would finish
+        # normally and report wrong storage costs.
+        raise FileNotFoundError(
+            f"No cost data for planning horizon {planning_horizon}: none of {possible_paths} exists. "
+            "update_bess_costs needs wacc_real and opex_fixed_per_kw for every battery carrier.",
         )
-        # fallback defaults
-        costs = pd.DataFrame(columns=["wacc_real", "opex_fixed_per_kw", "lifetime"])
+    costs = costs_df.pivot(index="pypsa-name", columns="parameter", values="value")
 
     # 2. Update BESS units — filter by *this chemistry's* carriers only. A
     # substring match on "battery_storage" would sweep in Na-ion units (their
@@ -142,16 +162,10 @@ def update_bess_costs(n, planning_horizon, experience, sys_engine, tech, config)
         carrier = row.carrier
         duration = float(row.max_hours)
 
-        # Look up parameters from the cost file
-        try:
-            wacc = float(costs.at[carrier, "wacc_real"])
-            fom = float(costs.at[carrier, "opex_fixed_per_kw"])
-            lifetime = float(row.lifetime)  # read directly from network component
-        except KeyError:
-            # default fallback values if carrier not in costs
-            wacc = 0.055
-            fom = 26.25  # $/kW-year (approx 2.5% of $1050/kW)
-            lifetime = 20.0
+        # Look up parameters from the cost file; a missing carrier or value raises
+        wacc = _bess_cost_param(costs, carrier, "wacc_real", planning_horizon, cost_file)
+        fom = _bess_cost_param(costs, carrier, "opex_fixed_per_kw", planning_horizon, cost_file)
+        lifetime = float(row.lifetime)  # read directly from network component
 
         # Evaluate overnight CAPEX components using the STEER system engine
         # We need Cell and Pack (energy components, config.scaling_factor == 4.0) scaled by duration,
